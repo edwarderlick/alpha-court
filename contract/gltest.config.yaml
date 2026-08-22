@@ -1,0 +1,15 @@
+networks:
+  default: localnet
+  localnet:
+    # GLSim (or local Studio) on http://127.0.0.1:4000/api. Started with a
+    # small dev-time validator count via `glsim --port 4000 --validators 3`
+    # (sim_createRandomValidators is not a current mechanism -- see Step 0
+    # research notes in contracts/alpha_court.py header).
+    default_wait_interval: 2000
+    default_wait_retries: 60
+  studionet:
+    default_wait_interval: 5000
+    default_wait_retries: 60
+
+paths:
+  contracts: contracts

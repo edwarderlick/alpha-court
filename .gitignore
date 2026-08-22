@@ -1,0 +1,48 @@
+# dependencies / build
+node_modules/
+.next/
+out/
+dist/
+build/
+*.tsbuildinfo
+.turbo/
+
+# python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+contract/artifacts/
+
+# secrets — never commit
+.env
+.env.*
+!.env.example
+!.env*.example
+
+# vercel / local tooling
+.vercel
+.claude
+.grok
+
+# editor / os
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# verification dumps, local books, coverage
+web/_verify/
+web/.data/
+coverage/
+*.pem
+*.key
+
+# accidental root lockfile (the real lockfile is web/package-lock.json)
+/package-lock.json

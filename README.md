@@ -256,7 +256,9 @@ Copy `web/.env.example`. **Do not put real keys in git or in this README.**
 | `KEEPER_SECRET` | server | Bearer token for `/api/keeper/tick` |
 | `CRON_SECRET` | server | Vercel Cron `Authorization: Bearer` |
 
-On Vercel, set **Root Directory** to `web`. Serverless does not keep `setInterval`; Cron hits `GET /api/keeper/tick`. Hobby plans may run Cron only once per day.
+On Vercel, set **Root Directory** to `web`. Serverless does not keep `setInterval`; Cron hits `GET /api/keeper/tick`. This project's `vercel.json` is set to **once per day** (`0 0 * * *`) so a Hobby account can deploy. Pro unlocks hourly ticks.
+
+Pushes to `main` deploy production via [`.github/workflows/deploy.yml`](./.github/workflows/deploy.yml). GitHub Actions needs three repository secrets: `VERCEL_TOKEN` (create at [vercel.com/account/tokens](https://vercel.com/account/tokens)), `VERCEL_ORG_ID`, and `VERCEL_PROJECT_ID`. Native Vercel GitHub App linking also works if you install the [Vercel GitHub App](https://github.com/apps/vercel) on this repo and set Root Directory to `web`.
 
 ---
 

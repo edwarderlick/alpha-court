@@ -140,9 +140,16 @@ export async function readOneClaim(id: string) {
   return row;
 }
 
+type Client = Awaited<ReturnType<typeof createClient>>;
+type TxHash = NonNullable<Parameters<Client["waitForTransactionReceipt"]>[0]["hash"]>;
+
+function asTxHash(hash: string): TxHash {
+  return hash as TxHash;
+}
+
 export async function readTransaction(hash: string) {
   const client = getReadClient();
-  return client.getTransaction({ hash: hash as `0x${string}` });
+  return client.getTransaction({ hash: asTxHash(hash) });
 }
 
 async function submitWrite(
@@ -170,7 +177,7 @@ async function submitWrite(
   let receipt;
   try {
     receipt = await withTransientRetry(
-      () => client.waitForTransactionReceipt({ hash: txHash }),
+      () => client.waitForTransactionReceipt({ hash: asTxHash(txHash) }),
       PATIENT_CONFIRMATION_ATTEMPTS,
       PATIENT_CONFIRMATION_BASE_DELAY_MS
     );
@@ -221,7 +228,7 @@ export async function sendAsKeeper(to: Address, valueAtto: bigint) {
   let receipt;
   try {
     receipt = await withTransientRetry(
-      () => client.waitForTransactionReceipt({ hash: txHash }),
+      () => client.waitForTransactionReceipt({ hash: asTxHash(txHash) }),
       PATIENT_CONFIRMATION_ATTEMPTS,
       PATIENT_CONFIRMATION_BASE_DELAY_MS
     );

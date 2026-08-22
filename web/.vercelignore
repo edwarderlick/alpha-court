@@ -1,0 +1,11 @@
+node_modules
+.next
+_verify
+.data
+.env
+.env.local
+.env*.local
+*.tsbuildinfo
+coverage
+playwright-report
+test-results

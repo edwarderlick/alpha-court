@@ -232,7 +232,7 @@ export function explainContractError(message: string): string {
 
 /** On-chain ids are decimal strings from next_claim_id. Local pins used
  *  `pending-*` and those must never be sent to stake_for/stake_against. */
-export function isOnChainClaimId(id: string | null | undefined): boolean {
+export function isOnChainClaimId(id: string | null | undefined): id is string {
   return typeof id === "string" && /^\d+$/.test(id.trim());
 }
 

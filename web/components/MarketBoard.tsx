@@ -132,18 +132,11 @@ export function MarketBoard({ claims }: { claims: ClaimSummary[] }) {
         {shown.map((claim, i) => {
           const onChain = isOnChainClaimId(claim.claim_id);
           const pending = isPendingClaimId(claim.claim_id);
-          const Card = onChain ? Link : "div";
-          const cardProps = onChain
-            ? { href: caseHref(claim) }
-            : {};
           const opacity = pending ? "opacity-70" : "";
-          return (
-          <Card
-            key={claimRowKey(claim)}
-            {...cardProps}
-            className={`pressable form-rise group border border-white/10 bg-surface-container-lowest p-5 flex flex-col gap-4 hover:border-secondary-fixed/50 transition-colors duration-300 ${opacity}`}
-            style={{ animationDelay: `${Math.min(i, 8) * 40}ms` }}
-          >
+          const className = `pressable form-rise group border border-white/10 bg-surface-container-lowest p-5 flex flex-col gap-4 hover:border-secondary-fixed/50 transition-colors duration-300 ${opacity}`;
+          const style = { animationDelay: `${Math.min(i, 8) * 40}ms` as const };
+          const body = (
+            <>
             <div className="flex items-start justify-between gap-3">
               <div className="flex items-center gap-3 min-w-0">
                 <AssetPairMark a={claim.asset} b={claim.asset_b} size={36} />
@@ -188,7 +181,24 @@ export function MarketBoard({ claims }: { claims: ClaimSummary[] }) {
                 Not stakable until the real claim id is known
               </p>
             )}
-          </Card>
+            </>
+          );
+          if (onChain) {
+            return (
+              <Link
+                key={claimRowKey(claim)}
+                href={caseHref(claim)}
+                className={className}
+                style={style}
+              >
+                {body}
+              </Link>
+            );
+          }
+          return (
+            <div key={claimRowKey(claim)} className={className} style={style}>
+              {body}
+            </div>
           );
         })}
       </div>

@@ -9,6 +9,21 @@ import {
 } from "./rpc-retry";
 import { UnconfirmedSubmissionError } from "./errors";
 import { extractLeaderResult } from "./receipt";
+import { getActiveProvider, type EthereumProvider } from "./eip6963";
+
+export {
+  hasInjectedWallet,
+  rememberProvider,
+  forgetProvider,
+  getActiveProvider,
+  startWalletDiscovery,
+  subscribeDiscoveredWallets,
+  listInjectedWallets,
+  storedWalletRdns,
+  findInjectedWallet,
+  type EthereumProvider,
+  type EIP6963ProviderDetail,
+} from "./eip6963";
 
 /**
  * Build Prompt 11: real MetaMask (or another injected EIP-1193 wallet)
@@ -53,50 +68,49 @@ const CHAIN_BY_NETWORK: Record<GenLayerNetwork, (typeof chains)["studionet"]> = 
 
 export const TARGET_CHAIN = CHAIN_BY_NETWORK[TARGET_NETWORK];
 
-type EthereumProvider = {
-  request: (args: { method: string; params?: unknown[] | Record<string, unknown> }) => Promise<unknown>;
-  on?: (event: string, cb: (...args: unknown[]) => void) => void;
-  removeListener?: (event: string, cb: (...args: unknown[]) => void) => void;
-};
-
-function windowEthereum(): EthereumProvider | undefined {
-  return typeof window !== "undefined" ? (window as unknown as { ethereum?: EthereumProvider }).ethereum : undefined;
-}
-
-export function hasInjectedWallet(): boolean {
-  return Boolean(windowEthereum());
-}
-
 function getProvider(): EthereumProvider {
-  const provider = windowEthereum();
+  const provider = getActiveProvider();
   if (!provider) {
-    throw new Error("No wallet extension detected. Install MetaMask to continue.");
+    throw new Error("No wallet extension detected. Install MetaMask, Rabby, or Coinbase Wallet to continue.");
   }
   return provider;
 }
 
-export async function requestAccounts(): Promise<string> {
-  const provider = getProvider();
-  // Real rejection UX lives here: MetaMask rejects this promise (code 4001)
+export function explainWalletError(err: unknown): string {
+  const code = (err as { code?: number })?.code;
+  if (code === 4001) return "You rejected the connection request.";
+  if (code === 4100) return "This wallet is not authorized for this site.";
+  if (err instanceof Error && err.message) return err.message;
+  return String(err);
+}
+
+export async function requestAccounts(provider?: EthereumProvider): Promise<string> {
+  const next = provider ?? getProvider();
+  // Real rejection UX lives here: the wallet rejects this promise (code 4001)
   // if the user declines the connect prompt -- propagated as a real
   // Error, never silently treated as a successful connection.
-  const accounts = (await provider.request({ method: "eth_requestAccounts" })) as string[];
-  if (!accounts?.[0]) throw new Error("No account returned by wallet.");
-  return accounts[0];
+  try {
+    const accounts = (await next.request({ method: "eth_requestAccounts" })) as string[];
+    if (!accounts?.[0]) throw new Error("No account returned by wallet.");
+    return accounts[0];
+  } catch (err) {
+    throw new Error(explainWalletError(err));
+  }
 }
 
 /** Silent check (no popup) for whether this site is already authorized. */
-export async function getAuthorizedAccounts(): Promise<string[]> {
-  if (!hasInjectedWallet()) return [];
+export async function getAuthorizedAccounts(provider?: EthereumProvider): Promise<string[]> {
+  const next = provider ?? getActiveProvider();
+  if (!next) return [];
   try {
-    return (await getProvider().request({ method: "eth_accounts" })) as string[];
+    return (await next.request({ method: "eth_accounts" })) as string[];
   } catch {
     return [];
   }
 }
 
-export async function getCurrentChainIdHex(): Promise<string> {
-  return (await getProvider().request({ method: "eth_chainId" })) as string;
+export async function getCurrentChainIdHex(provider?: EthereumProvider): Promise<string> {
+  return (await (provider ?? getProvider()).request({ method: "eth_chainId" })) as string;
 }
 
 export function isOnTargetChain(chainIdHex: string): boolean {
@@ -143,20 +157,26 @@ export async function trySnapAndChainSetup(address: string): Promise<boolean> {
   }
 }
 
-export function onAccountsChanged(cb: (accounts: string[]) => void): () => void {
-  if (!hasInjectedWallet()) return () => {};
-  const provider = getProvider();
+export function onAccountsChanged(
+  cb: (accounts: string[]) => void,
+  provider?: EthereumProvider
+): () => void {
+  const next = provider ?? getActiveProvider();
+  if (!next) return () => {};
   const handler = (...args: unknown[]) => cb(args[0] as string[]);
-  provider.on?.("accountsChanged", handler);
-  return () => provider.removeListener?.("accountsChanged", handler);
+  next.on?.("accountsChanged", handler);
+  return () => next.removeListener?.("accountsChanged", handler);
 }
 
-export function onChainChanged(cb: (chainIdHex: string) => void): () => void {
-  if (!hasInjectedWallet()) return () => {};
-  const provider = getProvider();
+export function onChainChanged(
+  cb: (chainIdHex: string) => void,
+  provider?: EthereumProvider
+): () => void {
+  const next = provider ?? getActiveProvider();
+  if (!next) return () => {};
   const handler = (...args: unknown[]) => cb(args[0] as string);
-  provider.on?.("chainChanged", handler);
-  return () => provider.removeListener?.("chainChanged", handler);
+  next.on?.("chainChanged", handler);
+  return () => next.removeListener?.("chainChanged", handler);
 }
 
 /**

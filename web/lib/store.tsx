@@ -1,23 +1,28 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
+  forgetProvider,
   getAuthorizedAccounts,
   getCurrentChainIdHex,
-  hasInjectedWallet,
   isOnTargetChain,
+  listInjectedWallets,
   onAccountsChanged,
   onChainChanged,
+  rememberProvider,
   requestAccounts,
+  startWalletDiscovery,
+  storedWalletRdns,
+  subscribeDiscoveredWallets,
   trySnapAndChainSetup,
+  type EthereumProvider,
 } from "./genlayer/wallet";
 
 /**
- * Build Prompt 11: real wallet connect, replacing the Build Prompt 9
- * placeholder (this file's previous docstring read "No real wallet/
- * contract logic -- visual only"). Structure mirrors Provider Court's own
- * lib/store.tsx, confirmed to be its real, working implementation (not a
- * deferred/demo state) before reusing it here.
+ * Real wallet connect. Injected wallets are discovered via EIP-6963 so
+ * MetaMask, Rabby, Coinbase Wallet, Brave, OKX, etc. can each be chosen
+ * explicitly. The selected EIP-1193 provider is stored and later passed
+ * to genlayer-js createClient({ provider }).
  */
 export type WalletStatus = "disconnected" | "connecting" | "connected";
 
@@ -39,10 +44,9 @@ const DEFAULT_WALLET: WalletState = {
 
 type AppState = {
   wallet: WalletState;
-  connectWallet: () => Promise<void>;
+  connectWallet: (provider: EthereumProvider, rdns: string) => Promise<void>;
   disconnectWallet: () => void;
   switchNetwork: () => Promise<void>;
-  // Kept for the existing wallet-connect modal shell (provider picker UI).
   walletModalOpen: boolean;
   openWalletModal: () => void;
   closeWalletModal: () => void;
@@ -53,6 +57,10 @@ const AppStateContext = createContext<AppState | null>(null);
 export function AppStateProvider({ children }: { children: ReactNode }) {
   const [wallet, setWallet] = useState<WalletState>(DEFAULT_WALLET);
   const [walletModalOpen, setWalletModalOpen] = useState(false);
+  const [providerEpoch, setProviderEpoch] = useState(0);
+  const walletRef = useRef(wallet);
+  walletRef.current = wallet;
+  const userDisconnected = useRef(false);
 
   const refreshChainStatus = useCallback(async () => {
     try {
@@ -64,25 +72,62 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (!hasInjectedWallet()) return;
-    getAuthorizedAccounts().then(async (accounts) => {
-      if (accounts.length === 0) return;
-      const chainIdHex = await getCurrentChainIdHex();
-      setWallet({
-        status: "connected",
-        address: accounts[0],
-        wrongNetwork: !isOnTargetChain(chainIdHex),
-        snapInstalled: null,
-      });
-      const snapInstalled = await trySnapAndChainSetup(accounts[0]);
-      setWallet((w) => (w.status === "connected" ? { ...w, snapInstalled } : w));
+    startWalletDiscovery();
+    let cancelled = false;
+    let inFlight = false;
+
+    async function tryReconnect() {
+      if (cancelled || inFlight || userDisconnected.current) return;
+      if (walletRef.current.status === "connected" || walletRef.current.status === "connecting") return;
+      inFlight = true;
+      try {
+        const injected = listInjectedWallets();
+        if (injected.length === 0) return;
+        const saved = storedWalletRdns();
+        const ordered = saved
+          ? [...injected.filter((w) => w.info.rdns === saved), ...injected.filter((w) => w.info.rdns !== saved)]
+          : injected;
+        for (const detail of ordered) {
+          const accounts = await getAuthorizedAccounts(detail.provider);
+          if (cancelled || userDisconnected.current || accounts.length === 0) continue;
+          rememberProvider(detail.info.rdns, detail.provider);
+          const chainIdHex = await getCurrentChainIdHex(detail.provider);
+          if (cancelled || userDisconnected.current) return;
+          setWallet({
+            status: "connected",
+            address: accounts[0],
+            wrongNetwork: !isOnTargetChain(chainIdHex),
+            snapInstalled: null,
+          });
+          setProviderEpoch((n) => n + 1);
+          const snapInstalled = await trySnapAndChainSetup(accounts[0]);
+          if (!cancelled && !userDisconnected.current) {
+            setWallet((w) => (w.status === "connected" ? { ...w, snapInstalled } : w));
+          }
+          return;
+        }
+      } finally {
+        inFlight = false;
+      }
+    }
+
+    const unsub = subscribeDiscoveredWallets(() => {
+      void tryReconnect();
     });
+    void tryReconnect();
+    const late = setTimeout(() => void tryReconnect(), 400);
+    return () => {
+      cancelled = true;
+      unsub();
+      clearTimeout(late);
+    };
   }, []);
 
   useEffect(() => {
-    if (!hasInjectedWallet()) return;
+    if (wallet.status !== "connected") return;
     const offAccounts = onAccountsChanged((accounts) => {
       if (accounts.length === 0) {
+        forgetProvider();
         setWallet({ status: "disconnected", address: null, wrongNetwork: false, snapInstalled: null });
       } else {
         setWallet((w) => (w.status === "connected" ? { ...w, address: accounts[0] } : w));
@@ -95,24 +140,30 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       offAccounts();
       offChain();
     };
-  }, [refreshChainStatus]);
+  }, [wallet.status, providerEpoch, refreshChainStatus]);
 
-  const connectWallet = useCallback(async () => {
+  const connectWallet = useCallback(async (provider: EthereumProvider, rdns: string) => {
+    userDisconnected.current = false;
+    rememberProvider(rdns, provider);
     setWallet({ status: "connecting", address: null, wrongNetwork: false, snapInstalled: null });
     try {
-      const address = await requestAccounts();
-      const chainIdHex = await getCurrentChainIdHex();
+      const address = await requestAccounts(provider);
+      const chainIdHex = await getCurrentChainIdHex(provider);
       const wrongNetwork = !isOnTargetChain(chainIdHex);
       setWallet({ status: "connected", address, wrongNetwork, snapInstalled: null });
+      setProviderEpoch((n) => n + 1);
       const snapInstalled = await trySnapAndChainSetup(address);
       setWallet((w) => (w.status === "connected" ? { ...w, snapInstalled } : w));
     } catch (err) {
+      forgetProvider();
       setWallet({ status: "disconnected", address: null, wrongNetwork: false, snapInstalled: null });
       throw err;
     }
   }, []);
 
   const disconnectWallet = useCallback(() => {
+    userDisconnected.current = true;
+    forgetProvider();
     setWallet({ status: "disconnected", address: null, wrongNetwork: false, snapInstalled: null });
   }, []);
 

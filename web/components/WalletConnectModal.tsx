@@ -1,47 +1,110 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useAppState } from "@/lib/store";
-import { hasInjectedWallet } from "@/lib/genlayer/wallet";
+import {
+  listInjectedWallets,
+  startWalletDiscovery,
+  subscribeDiscoveredWallets,
+  type EIP6963ProviderDetail,
+} from "@/lib/genlayer/wallet";
+import { WalletGlyph } from "./WalletIcons";
 import { WrongNetworkBanner } from "./WrongNetworkBanner";
 
-/**
- * Wallet-connect modal shell, converted verbatim from
- * wallet_connect_pro_theme/code.html. Build Prompt 9 kept it visual-only
- * ("selecting a provider does nothing but close the modal"); Build Prompt
- * 11 wires the MetaMask option to a real connectWallet() call -- a
- * rejected MetaMask prompt is caught and shown as a real error here, never
- * silently treated as a successful connection. WalletConnect/Coinbase stay
- * disabled and labeled "not available" rather than faking a connection,
- * same honesty standard as Provider Court's own WalletChip.
- */
+type ModalRow = {
+  id: string;
+  name: string;
+  description: string;
+  available: boolean;
+  rdns: string;
+  icon: string;
+  detail?: EIP6963ProviderDetail;
+};
+
+function extraRows(injected: EIP6963ProviderDetail[]): ModalRow[] {
+  const rdns = injected.map((w) => w.info.rdns.toLowerCase());
+  const names = injected.map((w) => w.info.name.toLowerCase());
+  const extras: ModalRow[] = [];
+  const hasCoinbase = rdns.some((r) => r.includes("coinbase")) || names.some((n) => n.includes("coinbase"));
+  extras.push({
+    id: "walletconnect",
+    name: "WalletConnect",
+    description: "QR and mobile — coming soon",
+    available: false,
+    rdns: "walletconnect",
+    icon: "/wallets/walletconnect.svg",
+  });
+  if (!hasCoinbase) {
+    extras.push({
+      id: "coinbase-soon",
+      name: "Coinbase Wallet",
+      description: "Mobile / QR — coming soon",
+      available: false,
+      rdns: "com.coinbase.wallet",
+      icon: "/wallets/coinbase.svg",
+    });
+  }
+  return extras;
+}
+
 export function WalletConnectModal() {
   const { walletModalOpen, closeWalletModal, wallet, connectWallet, switchNetwork } = useAppState();
   const [error, setError] = useState<string | null>(null);
-  const [connecting, setConnecting] = useState(false);
+  const [connectingId, setConnectingId] = useState<string | null>(null);
+  const [injected, setInjected] = useState<EIP6963ProviderDetail[]>([]);
+
+  useEffect(() => {
+    if (!walletModalOpen) return;
+    startWalletDiscovery();
+    const sync = () => setInjected(listInjectedWallets());
+    sync();
+    return subscribeDiscoveredWallets(sync);
+  }, [walletModalOpen]);
+
+  const rows = useMemo<ModalRow[]>(() => {
+    const discovered: ModalRow[] = injected.map((detail) => ({
+      id: detail.info.uuid,
+      name: detail.info.name,
+      description: "Connect using browser extension",
+      available: true,
+      rdns: detail.info.rdns,
+      icon: detail.info.icon,
+      detail,
+    }));
+    const extras = extraRows(injected);
+    if (discovered.length === 0) {
+      return [
+        {
+          id: "metamask-install",
+          name: "MetaMask",
+          description: "Install the browser extension",
+          available: false,
+          rdns: "io.metamask",
+          icon: "/wallets/metamask.svg",
+        },
+        ...extras,
+      ];
+    }
+    return [...discovered, ...extras];
+  }, [injected]);
 
   if (!walletModalOpen) return null;
 
-  const providers = [
-    { name: "MetaMask", description: "Connect using browser extension", available: true },
-    { name: "WalletConnect", description: "Not yet available", available: false },
-    { name: "Coinbase Wallet", description: "Not yet available", available: false },
-  ];
-
-  async function handleConnect() {
+  async function handleConnect(row: ModalRow) {
+    if (!row.available || !row.detail) return;
     setError(null);
-    setConnecting(true);
+    setConnectingId(row.id);
     try {
-      await connectWallet();
+      await connectWallet(row.detail.provider, row.detail.info.rdns);
       closeWalletModal();
     } catch (err) {
-      // A rejected MetaMask connect prompt (or no wallet installed) lands
-      // here as a real error message, never as a silent success.
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setConnecting(false);
+      setConnectingId(null);
     }
   }
+
+  const noneInstalled = injected.length === 0;
 
   return (
     <div className="fixed inset-0 z-[100] bg-black/90 backdrop-blur-xl flex items-center justify-center p-4">
@@ -68,37 +131,42 @@ export function WalletConnectModal() {
           </button>
         </div>
         <div className="px-8 pb-2 relative z-10 flex flex-col gap-4">
-          {!hasInjectedWallet() && (
+          {noneInstalled && (
             <p className="font-label-mono-sm text-label-mono-sm text-dispute-red">
-              No wallet extension detected. Install MetaMask to continue.
+              No wallet extension detected. Install MetaMask, Rabby, Coinbase Wallet, or Brave to continue.
             </p>
           )}
           {error && (
             <p className="font-label-mono-sm text-label-mono-sm text-dispute-red break-all">{error}</p>
           )}
-          {providers.map((provider) => (
-            <button
-              key={provider.name}
-              onClick={provider.available ? handleConnect : undefined}
-              disabled={!provider.available || !hasInjectedWallet() || connecting}
-              className="w-full bg-[#1a1a1a] border border-white/10 hover:border-secondary-container rounded-2xl p-5 flex items-center justify-between group transition-all duration-300 relative overflow-hidden glow-lime-hover disabled:opacity-40 disabled:hover:border-white/10"
-            >
-              <div className="flex items-center gap-4 relative z-10">
-                <div className="w-12 h-12 bg-black/50 rounded-full flex items-center justify-center border border-white/10 group-hover:border-secondary-container transition-colors" />
-                <div className="text-left">
-                  <span className="block font-label-mono-bold text-label-mono-bold text-white uppercase tracking-wider mb-1 group-hover:text-secondary-container transition-colors">
-                    {provider.available && connecting ? "CONNECTING..." : provider.name}
-                  </span>
-                  <span className="block font-body-md text-[12px] text-on-surface-variant font-mono">
-                    {provider.description}
-                  </span>
+          {rows.map((row) => {
+            const busy = connectingId === row.id;
+            const disabled = !row.available || connectingId !== null;
+            return (
+              <button
+                key={row.id}
+                type="button"
+                onClick={row.available ? () => handleConnect(row) : undefined}
+                disabled={disabled}
+                className="w-full bg-[#1a1a1a] border border-white/10 hover:border-secondary-container rounded-2xl p-5 flex items-center justify-between group transition-all duration-300 relative overflow-hidden glow-lime-hover disabled:opacity-40 disabled:hover:border-white/10"
+              >
+                <div className="flex items-center gap-4 relative z-10 min-w-0">
+                  <WalletGlyph name={row.name} rdns={row.rdns} icon={row.icon} />
+                  <div className="text-left min-w-0">
+                    <span className="block font-label-mono-bold text-label-mono-bold text-white uppercase tracking-wider mb-1 group-hover:text-secondary-container transition-colors truncate">
+                      {busy ? "CONNECTING..." : row.name}
+                    </span>
+                    <span className="block font-body-md text-[12px] text-on-surface-variant font-mono">
+                      {row.description}
+                    </span>
+                  </div>
                 </div>
-              </div>
-              <span className="material-symbols-outlined text-on-surface-variant group-hover:text-secondary-container transition-colors relative z-10">
-                chevron_right
-              </span>
-            </button>
-          ))}
+                <span className="material-symbols-outlined text-on-surface-variant group-hover:text-secondary-container transition-colors relative z-10 shrink-0">
+                  chevron_right
+                </span>
+              </button>
+            );
+          })}
         </div>
         <div className="bg-black/50 px-8 py-4 mt-6 border-t border-white/5 relative z-10 text-center">
           <p className="font-body-md text-[12px] text-on-surface-variant/70 font-mono">

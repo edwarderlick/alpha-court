@@ -28,8 +28,9 @@ export default async function LandingPage() {
   const pool = claims[0]
     ? (parseFloat(claims[0].stake_for_total) || 0) + (parseFloat(claims[0].stake_against_total) || 0)
     : 0;
-  const forPct = pool > 0 ? ((parseFloat(claims[0].stake_for_total) || 0) / pool) * 100 : 62;
-  const againstPct = pool > 0 ? 100 - forPct : 38;
+  const hasStakes = pool > 0;
+  const forPct = hasStakes ? ((parseFloat(claims[0].stake_for_total) || 0) / pool) * 100 : 0;
+  const againstPct = hasStakes ? 100 - forPct : 0;
 
   return (
     <div className="font-sans text-black antialiased overflow-x-hidden selection:bg-alpha-purple selection:text-white">
@@ -196,20 +197,30 @@ export default async function LandingPage() {
               </svg>
             </Link>
           </div>
-          <div className="space-y-6 max-w-5xl">
-            <div className="relative w-full h-24 bg-gray-100 rounded-r-full overflow-hidden opacity-0 animate-fade-in-up stagger-1">
-              <div className="absolute top-0 left-0 h-full bg-alpha-purple rounded-r-full flex items-center justify-end px-8 glow-purple" style={{ width: `${Math.max(18, forPct)}%` }}>
-                <span className="font-mono text-white text-sm font-bold opacity-80">FOR</span>
+          {hasStakes ? (
+            <div className="space-y-6 max-w-5xl">
+              <div className="relative w-full h-24 bg-gray-100 rounded-r-full overflow-hidden opacity-0 animate-fade-in-up stagger-1">
+                <div className="absolute top-0 left-0 h-full bg-alpha-purple rounded-r-full flex items-center justify-end px-8 glow-purple" style={{ width: `${Math.max(18, forPct)}%` }}>
+                  <span className="font-mono text-white text-sm font-bold opacity-80">FOR</span>
+                </div>
               </div>
-            </div>
-            <div className="relative w-full h-24 flex items-center gap-4 opacity-0 animate-fade-in-up stagger-2">
-              <div className="relative flex-1 h-full bg-gray-100 rounded-r-full overflow-hidden">
-                <div className="absolute top-0 left-0 h-full bg-lime-green rounded-r-full flex items-center justify-end px-8 glow-lime" style={{ width: `${Math.max(18, againstPct)}%` }}>
-                  <span className="font-mono text-black text-sm font-bold opacity-60">AGAINST</span>
+              <div className="relative w-full h-24 flex items-center gap-4 opacity-0 animate-fade-in-up stagger-2">
+                <div className="relative flex-1 h-full bg-gray-100 rounded-r-full overflow-hidden">
+                  <div className="absolute top-0 left-0 h-full bg-lime-green rounded-r-full flex items-center justify-end px-8 glow-lime" style={{ width: `${Math.max(18, againstPct)}%` }}>
+                    <span className="font-mono text-black text-sm font-bold opacity-60">AGAINST</span>
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
+          ) : (
+            <div className="max-w-5xl opacity-0 animate-fade-in-up stagger-1">
+              <div className="relative w-full h-24 bg-gray-100 rounded-r-full flex items-center px-8 border border-dashed border-gray-300">
+                <span className="font-mono text-gray-400 text-sm font-bold uppercase tracking-wide">
+                  No stakes yet on this docket
+                </span>
+              </div>
+            </div>
+          )}
         </div>
       </section>
 

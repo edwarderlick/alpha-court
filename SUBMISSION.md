@@ -12,15 +12,17 @@ For the steward. Product facts only. Live court on GenLayer studionet (chain `61
 
 **Decision:** proceed. Alpha Court multiplies the official example's core primitive (LLM consensus resolving a real-world claim) into three claim types, real staking economics, a reasoned (not boolean) verdict citing structured evidence, appeals, and permanent reputation.
 
-## 1. Consensus integrity — stored outcome vs verdict text
+## 1. Consensus integrity — stored outcome vs verdict text, and vs the arithmetic
 
-**Reviewer pattern:** every stored, consequential field must be independently validated against what is persisted — not a nested summary or fingerprint of it. That was the exact basis of Concord's rejection.
+**Reviewer pattern:** every stored, consequential field must be independently validated against what is persisted — not a nested summary or fingerprint of it. That was the exact basis of Concord's rejection. FairSplit was pushed on the sibling version of the same pattern: a validated/stored decision that isn't cross-checked against an independent recomputation.
 
-**What Alpha Court does**
+**Concord-shaped gap (no second channel to diverge):** `consensus_result` (`HELD` / `BROKEN`) is **only ever assigned by parsing the leader's actual verdict text** (`_parse_decisive_outcome(verdict_text)`). There is no second, leader-supplied channel that could store a conflicting value. Staking payouts and Alpha Passport both read from this one field, derived from the one stored text.
 
-`consensus_result` (`HELD` / `BROKEN`) is **only ever assigned by parsing the leader's actual verdict text** (`_parse_decisive_outcome(verdict_text)`). There is no second, leader-supplied channel that could store a conflicting value. Staking payouts and Alpha Passport both read from this one field, derived from the one stored text.
+**FairSplit-shaped gap, now also closed:** parsing the text alone only proves internal consistency — it never forced the leader's *stated word* to agree with what the locked snapshot numbers actually say. `_naive_outcome(claim)` recomputes HELD/BROKEN deterministically, with zero LLM involvement, from the already-locked fields alone — for all three claim types (Price Threshold and Fundamentals Threshold: deadline value vs. threshold in the claimed direction; Relative Performance: comparing the two assets' already-locked % change). The genuine judgment call this build was designed around — which exchange's print counts, handling a data anomaly — already happened at evidence-*locking* time (the Category B tolerance-band fetch); once locked, "did it cross the threshold" is pure arithmetic. `_resolve_verdict_with_consensus` now rejects a cleanly-parsed verdict that disagrees with `_naive_outcome`, routing it through the exact same empty-result path the conflicting-words case already used — a leader whose stated word contradicts the arithmetic is exactly as inconclusive as one who hedged. Applied identically to both `resolve_verdict` and `resolve_appeal` (they share this one function).
 
-**Proof** (`contract/test/direct/test_consensus_gap.py`, 7 passed):
+**Proof:**
+
+`contract/test/direct/test_consensus_gap.py` (7 passed) — the Concord-shaped channel:
 
 | Test | What it proves |
 |---|---|
@@ -29,9 +31,22 @@ For the steward. Product facts only. Live court on GenLayer studionet (chain `61
 | `test_resolve_verdict_conflicting_words_do_not_pick_a_side` | Mixed HELD+BROKEN prose → `CONTESTED`, empty result, never a guessed side |
 | `test_get_claim_single_source_held_or_empty` | After resolve, `consensus_result` equals a fresh parse of stored `verdict_text` |
 
-**What this does not claim**
+`contract/test/direct/test_deterministic_outcome.py` (8 passed) — the FairSplit-shaped arithmetic cross-check, one adversarial test per claim type per round (a leader stating the *wrong* word against the locked numbers) plus a sanity check that a genuinely correct verdict is unaffected:
 
-Validators judge the verdict's *reasoning quality* via `prompt_non_comparative` (cite the real numbers, compare in the claimed direction). They do not independently re-derive a separate arithmetic outcome and fingerprint it the way a strict comparative check would. That property is an LLM-equivalence judgment, not a stored-field integrity property. Direct-mode tests cannot exercise live multi-validator consensus. That is a testing-coverage boundary, not a design gap.
+| Test | What it proves |
+|---|---|
+| `test_price_threshold_leader_held_but_naive_broken_is_contested` | Price Threshold: leader says HELD, arithmetic says BROKEN → `CONTESTED`, not a false HELD |
+| `test_price_threshold_leader_broken_but_naive_held_is_contested` | Same, opposite direction |
+| `test_price_threshold_leader_matches_naive_still_resolves` | A correct verdict is never rejected by the cross-check |
+| `test_relative_performance_leader_held_but_naive_broken_is_contested` | Relative Performance: leader's stated outperformance direction disagrees with the two assets' real % change → `CONTESTED` |
+| `test_fundamentals_leader_held_but_naive_broken_is_contested` | Fundamentals Threshold (negative-value NUPL case): also proves the offset-encoded metric decodes correctly inside the naive check, not just for a positive metric |
+| `test_resolve_appeal_price_threshold_leader_held_but_naive_broken_is_no_agreement` | Same cross-check on the appeal round → `REFUNDED`/`NO_AGREEMENT`, not a false settlement |
+| `test_resolve_appeal_relative_performance_leader_broken_but_naive_held_is_no_agreement` | Appeal round, Relative Performance |
+| `test_resolve_appeal_fundamentals_leader_broken_but_naive_held_is_no_agreement` | Appeal round, Fundamentals Threshold |
+
+**What this still does not claim**
+
+Validators additionally judge the verdict's *reasoning quality* via `prompt_non_comparative` (cite the real numbers, reason correctly) — that LLM-equivalence judgment is unchanged and still required; the arithmetic cross-check is additive, not a replacement. Direct-mode tests cannot exercise live multi-validator consensus. That is a testing-coverage boundary, not a design gap.
 
 ## 2. Payout mechanism — Studio cannot IC→EOA
 
@@ -60,7 +75,7 @@ Sybil Court hit the same wall on `withdraw()`. This is a platform limit, not an 
 | Live court | `0x8b2fF616d26Cb9bE48f4484BD5F8E7Cdaeca7902` |
 | Retired court | `0xd3cD69C30A4e899bA2D346723bffac066543cF97` |
 | Network | studionet, chain `61999` |
-| Direct tests | **72** collected (`pytest test/direct/`) |
+| Direct tests | **83** collected (`pytest test/direct/`) |
 
 Lifecycle on the live court (real txs, not UI labels):
 

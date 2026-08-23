@@ -1294,6 +1294,55 @@ def _build_fundamentals_threshold_facts(claim: "Claim") -> str:
 	)
 
 
+def _naive_outcome(claim: "Claim") -> str:
+	"""
+	Deterministic, LLM-free recomputation of HELD/BROKEN from the already-
+	locked snapshot fields alone. Everything a verdict needs to decide is
+	pure arithmetic once evidence-locking has fixed the snapshot values --
+	the real judgment call (which exchange's print counts, handling a data
+	anomaly) already happened at lock_deadline_evidence time via the
+	Category B tolerance-band consensus fetch. There is no genuine
+	interpretive step left for the leader to add here; its real value is
+	the cited written explanation, not deciding the word.
+
+	Cross-checked in _resolve_verdict_with_consensus against the leader's
+	stated conclusion -- never shown to the leader as a precomputed answer
+	(see _build_*_facts's "raw facts only" docstrings; this runs strictly
+	after the leader has already committed to verdict_text). A stated
+	verdict that disagrees with this is routed through the exact same
+	empty-result path _parse_decisive_outcome's own no-conflicting-words
+	case already uses, rather than a new state-transition branch.
+
+	Mirrors each claim type's own VERDICT_CRITERIA wording exactly:
+	  - Price/Fundamentals Threshold: 'above' requires strictly exceeding
+	    the threshold to be HELD, 'below' requires strictly under it --
+	    equality is BROKEN either way, matching "must exceed"/"must be
+	    under" in the criteria text (not >=/<=).
+	  - Relative Performance: HELD only if asset_a's % change strictly
+	    exceeded asset_b's ("HELD means asset_a's percentage change
+	    exceeded asset_b's; BROKEN means it did not") -- a tie is BROKEN.
+	"""
+	if claim.claim_type == CLAIM_TYPE_RELATIVE_PERFORMANCE:
+		posting_a = claim.posting_price_atto / ATTO
+		deadline_a = claim.deadline_price_atto / ATTO
+		posting_b = claim.posting_price_b_atto / ATTO
+		deadline_b = claim.deadline_price_b_atto / ATTO
+		pct_a = (deadline_a - posting_a) / posting_a
+		pct_b = (deadline_b - posting_b) / posting_b
+		return OUTCOME_HELD if pct_a > pct_b else OUTCOME_BROKEN
+
+	if claim.claim_type == CLAIM_TYPE_FUNDAMENTALS_THRESHOLD:
+		deadline_value = _decode_fundamentals_value(claim.deadline_price_atto)
+		threshold = _decode_fundamentals_value(claim.threshold_atto)
+	else:
+		deadline_value = claim.deadline_price_atto / ATTO
+		threshold = claim.threshold_atto / ATTO
+
+	if claim.direction == "above":
+		return OUTCOME_HELD if deadline_value > threshold else OUTCOME_BROKEN
+	return OUTCOME_HELD if deadline_value < threshold else OUTCOME_BROKEN
+
+
 def _resolve_verdict_with_consensus(claim: "Claim") -> tuple[str, str]:
 	"""
 	Build Prompt 4: the real leader-verdict / validator-check mechanism,
@@ -1331,9 +1380,15 @@ def _resolve_verdict_with_consensus(claim: "Claim") -> tuple[str, str]:
 	     so verdict_text is also "" here.
 	  2. The call succeeds (validators accepted the verdict as well-formed
 	     and well-cited per criteria) but the returned text still doesn't
-	     parse to a single clean HELD/BROKEN via _parse_decisive_outcome --
-	     verdict_text is preserved (it's real, agreed text) even though
-	     consensus_result is "".
+	     parse to a single clean HELD/BROKEN via _parse_decisive_outcome,
+	     OR it does parse cleanly but disagrees with _naive_outcome's
+	     independent, deterministic recomputation from the same locked
+	     snapshot fields -- verdict_text is preserved (it's real, agreed
+	     text) even though consensus_result is "" in either case. The
+	     mismatch case is deliberately routed through the exact same
+	     "no agreement" path as the conflicting-words case, not a new
+	     branch: a leader whose stated word disagrees with the arithmetic
+	     is exactly as inconclusive as one who hedged.
 	"""
 	if claim.claim_type == CLAIM_TYPE_RELATIVE_PERFORMANCE:
 		facts = _build_relative_performance_facts(claim)
@@ -1353,7 +1408,10 @@ def _resolve_verdict_with_consensus(claim: "Claim") -> tuple[str, str]:
 	except gl.vm.UserError:
 		return "", ""
 
-	return verdict_text, (_parse_decisive_outcome(verdict_text) or "")
+	parsed = _parse_decisive_outcome(verdict_text)
+	if parsed is not None and parsed != _naive_outcome(claim):
+		parsed = None
+	return verdict_text, (parsed or "")
 
 
 class AlphaCourt(gl.Contract):

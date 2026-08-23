@@ -11,6 +11,8 @@ import "server-only";
 import { isOnChainClaimId, type ClaimSummary } from "./claim-display";
 import { writeAsKeeper, readClaimRaw } from "./client";
 import { studioCanRead, studioCanWrite } from "./studio-gate";
+import { storageKind } from "../persist";
+import { unsafeSignerWithoutRedis } from "./keeper-safety";
 import { bookGet, bookUpsert } from "./book";
 import { indexTriggeredTransfers, reclassifyUnverifiedPayouts } from "./payouts";
 import { isLegacyClaim } from "../legacy-claim-ids";
@@ -76,6 +78,17 @@ export async function runKeeperTick(): Promise<KeeperTickResult> {
 
   if (!keeperEnabled()) {
     result.skipped.push("keeper disabled");
+    lastTick = result;
+    return result;
+  }
+
+  const unsafeReason = unsafeSignerWithoutRedis(
+    Boolean(process.env.ALPHA_COURT_SIGNER_PRIVATE_KEY),
+    storageKind()
+  );
+  if (unsafeReason) {
+    console.error(`[keeper] ${unsafeReason}`);
+    result.skipped.push(unsafeReason);
     lastTick = result;
     return result;
   }

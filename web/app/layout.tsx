@@ -5,8 +5,10 @@ import { WalletConnectModal } from "@/components/WalletConnectModal";
 import { MarketPulseHost } from "@/components/MarketPulseHost";
 
 export const metadata: Metadata = {
+  metadataBase: new URL("https://alpha-court.vercel.app"),
   title: "ALPHA COURT | Immutable Justice Protocol",
   description: "Decentralized arbitration for crypto-legal claims.",
+  applicationName: "Alpha Court",
 };
 
 export default function RootLayout({

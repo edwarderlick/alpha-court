@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { AlphaMark } from "@/components/AlphaMark";
 import { ShaderBackground } from "@/components/ShaderBackground";
 import { ScrollFadeIn } from "@/components/ScrollFadeIn";
 import { LandingClock } from "@/components/LandingClock";
@@ -36,13 +37,9 @@ export default async function LandingPage() {
       <ScrollFadeIn />
 
       <nav className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-8 py-4 mix-blend-difference text-white">
-        <div className="flex items-center gap-2">
-          <svg className="text-white" fill="none" height="24" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" width="24">
-            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
-            <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
-            <line x1="12" x2="12" y1="22.08" y2="12"></line>
-          </svg>
-        </div>
+        <Link href="/" className="flex items-center gap-2 text-white" aria-label="Alpha Court">
+          <AlphaMark variant="mono" className="h-7 w-7" />
+        </Link>
         <div className="hidden md:flex gap-8 font-mono text-sm uppercase tracking-widest font-bold">
           <Link className="hover:text-alpha-purple transition-colors duration-300 ease-snappy" href="/">Home</Link>
           <Link className="hover:text-alpha-purple transition-colors duration-300 ease-snappy" href="/browse-cases">Markets</Link>

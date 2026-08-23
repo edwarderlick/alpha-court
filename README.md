@@ -1,4 +1,4 @@
-# Alpha Court
+# <img src="web/public/brand/mark-192.png" width="36" height="36" alt="" /> Alpha Court
 
 **On-chain prediction court on GenLayer.** Post a claim, stake GEN for or against it, lock Surf evidence at the deadline, and settle with validator consensus.
 

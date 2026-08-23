@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import { WalletChip } from "./WalletChip";
 import { OperatorCard } from "./OperatorCard";
 import { useDockPing } from "./MarketPulseHost";
+import { AlphaMark } from "./AlphaMark";
 
 const TOP_NAV_ITEMS = [
   { href: "/browse-cases", label: "Markets" },
@@ -113,7 +114,11 @@ export function AppShell({
       <header className="fixed top-0 inset-x-0 z-50 bg-background/95 backdrop-blur-md border-b border-white/10">
         <div className="h-20 px-5 md:px-8 flex items-center justify-between gap-6">
           <div className="flex items-center gap-8 min-w-0">
-            <Link href="/" className="font-display text-2xl md:text-3xl text-primary uppercase tracking-tight shrink-0">
+            <Link
+              href="/"
+              className="flex items-center gap-2.5 font-display text-2xl md:text-3xl text-primary uppercase tracking-tight shrink-0"
+            >
+              <AlphaMark className="h-8 w-8" />
               ALPHA COURT
             </Link>
             <nav className="hidden lg:flex items-center gap-7">

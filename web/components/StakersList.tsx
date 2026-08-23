@@ -23,14 +23,28 @@ function whenLabel(row: Staker): string {
   return t.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
-export function StakersList({ claimId, legacy = false }: { claimId: string; legacy?: boolean }) {
+export function StakersList({
+  claimId,
+  legacy = false,
+  origin,
+}: {
+  claimId: string;
+  legacy?: boolean;
+  /** Which court's claim this is, when known -- disambiguates a reused
+   * claim_id once more than one retired court exists. Without it, `legacy=1`
+   * alone can't say which retired court's claim to look up. */
+  origin?: string | null;
+}) {
   const [rows, setRows] = useState<Staker[] | null>(null);
   const [winningSide, setWinningSide] = useState<"for" | "against" | null>(null);
   const liveTick = useLiveStakers(claimId);
 
   useEffect(() => {
     let cancelled = false;
-    const qs = legacy ? "?legacy=1" : "";
+    const params = new URLSearchParams();
+    if (legacy) params.set("legacy", "1");
+    if (origin) params.set("origin", origin);
+    const qs = params.toString() ? `?${params.toString()}` : "";
     fetch(`/api/claims/${encodeURIComponent(claimId)}/stakers${qs}`, { cache: "no-store" })
       .then((res) => res.json())
       .then((data) => {
@@ -44,7 +58,7 @@ export function StakersList({ claimId, legacy = false }: { claimId: string; lega
     return () => {
       cancelled = true;
     };
-  }, [claimId, liveTick, legacy]);
+  }, [claimId, liveTick, legacy, origin]);
 
   if (rows === null) {
     return (

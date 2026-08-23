@@ -1,6 +1,7 @@
 import "server-only";
 import { readClaimRaw } from "./client";
 import { studioCanRead, studioNoteError } from "./studio-gate";
+import { currentCourtAddress } from "../legacy-claim-ids";
 import { hashLoad, hashSet, parseField } from "../persist";
 
 export type OnChainPassport = {
@@ -41,11 +42,18 @@ function asPassport(raw: unknown, fallbackAddress: string): OnChainPassport | nu
   };
 }
 
-/** Book-style cache for get_passport. Live Studio read only on miss/stale and only if the gate allows it. */
+/**
+ * Book-style cache for get_passport. Live Studio read only on miss/stale
+ * and only if the gate allows it. Keyed by origin::address, not bare
+ * address -- a bare-address key would serve one contract's cached
+ * win_count/claim_history as if it were another's after a redeploy, within
+ * the FRESH_MS window (the same class of cross-court collision this
+ * session's payout-key fix closed elsewhere).
+ */
 export async function getPassportCached(address: string): Promise<OnChainPassport | null> {
   const addr = address.trim();
   if (!addr.startsWith("0x") || addr.length < 10) return null;
-  const key = addr.toLowerCase();
+  const key = `${currentCourtAddress()}::${addr.toLowerCase()}`;
   const data = await load();
   const cached = data.byAddress[key];
   const fresh = cached && Date.now() - cached.at < FRESH_MS;

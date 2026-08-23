@@ -108,12 +108,12 @@ export default async function CaseDetailPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ legacy?: string; preview?: string }>;
+  searchParams: Promise<{ legacy?: string; preview?: string; origin?: string }>;
 }) {
   const { id } = await params;
-  const { legacy, preview } = await searchParams;
+  const { legacy, preview, origin: originParam } = await searchParams;
   let claim: Claim;
-  const booked = await findCachedClaim(id, { preferLegacy: legacy === "1" });
+  const booked = await findCachedClaim(id, { preferLegacy: legacy === "1", origin: originParam });
   const previewing =
     process.env.NODE_ENV !== "production" && preview === "APPEAL_PENDING";
 
@@ -259,7 +259,7 @@ export default async function CaseDetailPage({
               </div>
             </div>
             <EvidenceSection claim={claim} />
-            <StakersList claimId={claim.claim_id} legacy={isLegacyClaim(claim)} />
+            <StakersList claimId={claim.claim_id} legacy={isLegacyClaim(claim)} origin={claim.origin_contract} />
           </section>
         </div>
 

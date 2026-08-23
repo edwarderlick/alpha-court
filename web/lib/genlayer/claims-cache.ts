@@ -26,6 +26,9 @@ export async function rememberClaim(claim: ClaimSummary) {
   await bookUpsert(claim);
 }
 
-export async function findCachedClaim(id: string, opts?: { preferLegacy?: boolean }): Promise<ClaimSummary | null> {
+export async function findCachedClaim(
+  id: string,
+  opts?: { preferLegacy?: boolean; origin?: string | null }
+): Promise<ClaimSummary | null> {
   return bookGet(id, opts);
 }

@@ -176,7 +176,12 @@ def test_passport_win_recorded_via_settled_appeal_path(direct_vm, direct_deploy,
 def test_passport_loss_recorded_via_settled_appeal_path(direct_vm, direct_deploy, direct_alice):
 	contract = deploy(direct_deploy)
 	install_hook(direct_vm, [HEDGE])
-	claim_id = post_and_contest(direct_vm, contract, direct_alice)
+	# deadline_price below the 3000 "above" threshold so BROKEN is the real,
+	# deterministic answer -- the naive-outcome cross-check (added after
+	# this test was first written) would otherwise reject a mock leader
+	# saying BROKEN against a locked snapshot that actually says HELD
+	# (post_and_contest's own default of 3500.0).
+	claim_id = post_and_contest(direct_vm, contract, direct_alice, deadline_price=2000.0)
 
 	install_hook(direct_vm, ["After further review, the claim was BROKEN."])
 	direct_vm.sender = direct_alice

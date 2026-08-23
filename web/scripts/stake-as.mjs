@@ -2,7 +2,7 @@ import { createAccount, createClient, chains } from "genlayer-js";
 import { readFileSync } from "fs";
 import { join } from "path";
 
-const CONTRACT = "0x8b2fF616d26Cb9bE48f4484BD5F8E7Cdaeca7902";
+const CONTRACT = "0x22Cf7A9eA315e6EcE6C2BCBF60F0f656C39CCEE4";
 const who = process.argv[2]; // a | b | c
 const claimId = process.argv[3];
 const side = process.argv[4]; // for | against

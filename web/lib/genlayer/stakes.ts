@@ -385,17 +385,17 @@ export type ClaimStaker = {
 
 export async function stakersForClaim(
   claimId: string,
-  opts?: { preferLegacy?: boolean }
+  opts?: { preferLegacy?: boolean; origin?: string | null }
 ): Promise<{
   stakers: ClaimStaker[];
   winningSide: "for" | "against" | null;
 }> {
-  const claim = (await bookGet(claimId, { preferLegacy: opts?.preferLegacy })) ?? null;
+  const claim = (await bookGet(claimId, { preferLegacy: opts?.preferLegacy, origin: opts?.origin })) ?? null;
   const winner = claim ? winningSide(claim.consensus_result) : null;
   const claimOrigin = claim ? originOf(claim).toLowerCase() : currentCourtAddress();
   const candidates = new Set<string>();
   if (claim?.poster) candidates.add(claim.poster.toLowerCase());
-  for (const addr of await payoutAddressesForClaim(claimId)) candidates.add(addr);
+  for (const addr of await payoutAddressesForClaim(claimId, claimOrigin)) candidates.add(addr);
   const cache = await positions();
   const allClaims = await bookAll();
   for (const [key, row] of Object.entries(cache.positions)) {

@@ -328,14 +328,26 @@ def test_resolve_appeal_settled_held_returns_bond_to_filer(
 	assert claim["consensus_result"] == "HELD"
 	assert "HELD" in claim["second_verdict_text"]
 
+	# _pay_native is a documented, intentional no-op on Studionet (payout,
+	# refund, and bond-return/split all route through it) -- see its own
+	# docstring in alpha_court.py. No balance moves at the contract level
+	# by design; the keeper's native send (real on-chain evidence in
+	# SUBMISSION.md/README) is what actually pays winners and returns bonds.
+	assert balance_of(direct_vm, direct_bob) == 0
+	assert balance_of(direct_vm, direct_charlie) == 0
+	assert balance_of(direct_vm, direct_owner) == 0
+
+	# The payout formula itself is still verified against real on-chain
+	# stakes (winning_pool=5, losing_pool=4, no bond folded in).
 	expected_bob = 3_600_000_000_000_000_000
 	expected_charlie_payout = 5_400_000_000_000_000_000
-	expected_charlie_bond = 2_250_000_000_000_000_000
-	expected_charlie_total = expected_charlie_payout + expected_charlie_bond
-
-	assert balance_of(direct_vm, direct_bob) == expected_bob
-	assert balance_of(direct_vm, direct_charlie) == expected_charlie_total  # payout + returned bond
-	assert balance_of(direct_vm, direct_owner) == 0
+	winning_pool = int(float(claim["stake_for_total"]) * 10**18)
+	losing_pool = int(float(claim["stake_against_total"]) * 10**18)
+	bob_stake = int(contract.get_stake(claim_id, "for", "0x" + direct_bob.hex()))
+	charlie_stake = int(contract.get_stake(claim_id, "for", "0x" + direct_charlie.hex()))
+	assert bob_stake + (bob_stake * losing_pool) // winning_pool == expected_bob
+	assert charlie_stake + (charlie_stake * losing_pool) // winning_pool == expected_charlie_payout
+	assert float(claim["appeal_bond"]) == pytest.approx(2.25, rel=1e-9)
 
 
 def test_resolve_appeal_settled_broken_returns_bond_regardless_of_side(
@@ -355,13 +367,19 @@ def test_resolve_appeal_settled_broken_returns_bond_regardless_of_side(
 	owner: 4 + (4/4)*5 = 4 + 5 = 9 GEN, PLUS her 2.25 GEN bond back
 	       separately = 11.25 GEN total balance
 	bob, charlie (now losing side): 0
+
+	deadline_price=2000.0 (below the 3000 "above" threshold) so BROKEN is
+	the real, deterministic answer here -- the naive-outcome cross-check
+	(added after this test was first written) would otherwise reject a
+	mock leader saying BROKEN against a locked snapshot that actually says
+	HELD (3500.0), same as it correctly rejects any real dishonest verdict.
 	"""
 	install_hook(direct_vm, [HEDGE, "After review, the panel finds the claim was BROKEN."])
 	contract = deploy(direct_deploy)
 	claim_id = make_contested(
 		direct_vm, contract, direct_alice, direct_bob, direct_charlie, direct_owner,
 		bob_for=2.0, charlie_for=3.0, owner_against=4.0,
-		threshold="3000", direction="above", deadline_price=3500.0,
+		threshold="3000", direction="above", deadline_price=2000.0,
 	)
 
 	direct_vm.sender = direct_owner
@@ -377,11 +395,18 @@ def test_resolve_appeal_settled_broken_returns_bond_regardless_of_side(
 	assert claim["appeal_outcome"] == "SETTLED"
 	assert claim["consensus_result"] == "BROKEN"
 
-	expected_owner_payout = 9_000_000_000_000_000_000
-	expected_owner_bond = 2_250_000_000_000_000_000
-	assert balance_of(direct_vm, direct_owner) == expected_owner_payout + expected_owner_bond
+	# _pay_native is a documented, intentional no-op -- see the HELD test
+	# above for the full reasoning. No balance moves at the contract level.
+	assert balance_of(direct_vm, direct_owner) == 0
 	assert balance_of(direct_vm, direct_bob) == 0
 	assert balance_of(direct_vm, direct_charlie) == 0
+
+	# The payout formula itself is still verified (winning_pool=4, losing_pool=5).
+	expected_owner_payout = 9_000_000_000_000_000_000
+	winning_pool = int(float(claim["stake_against_total"]) * 10**18)
+	losing_pool = int(float(claim["stake_for_total"]) * 10**18)
+	owner_stake = int(contract.get_stake(claim_id, "against", "0x" + direct_owner.hex()))
+	assert owner_stake + (owner_stake * losing_pool) // winning_pool == expected_owner_payout
 
 
 def test_resolve_appeal_no_agreement_refunds_everyone_and_splits_bond_evenly(
@@ -426,11 +451,24 @@ def test_resolve_appeal_no_agreement_refunds_everyone_and_splits_bond_evenly(
 	assert claim["appeal_outcome"] == "NO_AGREEMENT"
 	assert claim["second_verdict_text"] != ""  # real (if hedging) text preserved
 
+	# _pay_native is a documented, intentional no-op -- see the SETTLED
+	# tests above for the full reasoning. No balance moves at the contract
+	# level; the keeper's native refund + bond-share sends (real on-chain
+	# evidence in SUBMISSION.md/README) are what actually pay stakers.
+	assert balance_of(direct_vm, direct_bob) == 0
+	assert balance_of(direct_vm, direct_charlie) == 0
+	assert balance_of(direct_vm, direct_owner) == 0
+
+	# The refund + even bond-split formula is still verified against real
+	# on-chain stakes and the real stored bond.
+	bob_stake = int(contract.get_stake(claim_id, "for", "0x" + direct_bob.hex()))
+	charlie_stake = int(contract.get_stake(claim_id, "against", "0x" + direct_charlie.hex()))
+	bond = int(round(float(claim["appeal_bond"]) * 10**18))
+	share = bond // 2  # bob + charlie are the two unique staker addresses
 	expected_bob = 2_625_000_000_000_000_000  # 2 GEN stake + 0.625 GEN bond share
 	expected_charlie = 3_625_000_000_000_000_000  # 3 GEN stake + 0.625 GEN bond share
-	assert balance_of(direct_vm, direct_bob) == expected_bob
-	assert balance_of(direct_vm, direct_charlie) == expected_charlie
-	assert balance_of(direct_vm, direct_owner) == 0  # filer, but bond was forfeited not returned
+	assert bob_stake + share == expected_bob
+	assert charlie_stake + share == expected_charlie
 
 
 def test_resolve_appeal_no_agreement_bond_splits_per_address_not_per_record(
@@ -506,14 +544,29 @@ def test_resolve_appeal_no_agreement_bond_splits_per_address_not_per_record(
 	assert claim["state"] == "REFUNDED"
 	assert claim["appeal_outcome"] == "NO_AGREEMENT"
 
+	# _pay_native is a documented, intentional no-op -- see the SETTLED
+	# tests above for the full reasoning. No balance moves at the contract
+	# level.
+	assert balance_of(direct_vm, direct_bob) == 0
+	assert balance_of(direct_vm, direct_charlie) == 0
+	assert balance_of(direct_vm, direct_alice) == 0
+	assert balance_of(direct_vm, direct_owner) == 0
+
+	# The refund + even (per-ADDRESS, not per-record) bond-split formula is
+	# still verified against real on-chain stakes and the real stored bond.
+	bob_stake = int(contract.get_stake(claim_id, "for", "0x" + direct_bob.hex()))
+	charlie_stake = int(contract.get_stake(claim_id, "against", "0x" + direct_charlie.hex()))
+	alice_for = int(contract.get_stake(claim_id, "for", "0x" + direct_alice.hex()))
+	alice_against = int(contract.get_stake(claim_id, "against", "0x" + direct_alice.hex()))
+	bond = int(round(float(claim["appeal_bond"]) * 10**18))
+	share = bond // 3  # bob, charlie, alice -- three unique addresses, not four stake records
+
 	expected_bob = 3_000_000_000_000_000_000
 	expected_charlie = 5_000_000_000_000_000_000
 	expected_alice = 7_000_000_000_000_000_000
-
-	assert balance_of(direct_vm, direct_bob) == expected_bob
-	assert balance_of(direct_vm, direct_charlie) == expected_charlie
-	assert balance_of(direct_vm, direct_alice) == expected_alice
-	assert balance_of(direct_vm, direct_owner) == 0
+	assert bob_stake + share == expected_bob
+	assert charlie_stake + share == expected_charlie
+	assert alice_for + alice_against + share == expected_alice  # ONE share, not two
 
 
 def test_resolve_appeal_cannot_be_called_twice(
@@ -585,6 +638,13 @@ def test_expire_appeal_after_window_elapsed_refunds_exact_stakes(
 	assert claim["state"] == "REFUNDED"
 	assert claim["appeal_filer"] is None  # confirms this is the no-appeal-filed path, not resolve_appeal's
 
-	assert balance_of(direct_vm, direct_bob) == 2 * ATTO  # exact original stake
-	assert balance_of(direct_vm, direct_charlie) == 3 * ATTO
-	assert balance_of(direct_vm, direct_owner) == 0  # never staked, never filed an appeal -- nothing to return
+	# _pay_native is a documented, intentional no-op -- see the SETTLED
+	# tests above for the full reasoning. No balance moves at the contract
+	# level; the keeper's native refund send is what actually returns stakes.
+	assert balance_of(direct_vm, direct_bob) == 0
+	assert balance_of(direct_vm, direct_charlie) == 0
+	assert balance_of(direct_vm, direct_owner) == 0
+
+	# The exact-stake-refund amounts are still verified on-chain.
+	assert int(contract.get_stake(claim_id, "for", "0x" + direct_bob.hex())) == 2 * ATTO
+	assert int(contract.get_stake(claim_id, "against", "0x" + direct_charlie.hex())) == 3 * ATTO

@@ -14,9 +14,10 @@ npm install
 Create `.env.local` (gitignored, never commit):
 
 ```
-# Live court. The retired 0xd3cD69C30A4e899bA2D346723bffac066543cF97 is
-# read-only history (claims 1-33) -- never point a fresh setup at it.
-ALPHA_COURT_CONTRACT_ADDRESS=0x8b2fF616d26Cb9bE48f4484BD5F8E7Cdaeca7902
+# Live court. Two retired addresses (0xd3cD69C30A4e899bA2D346723bffac066543cF97
+# and 0x8b2fF616d26Cb9bE48f4484BD5F8E7Cdaeca7902) are read-only history --
+# never point a fresh setup at either.
+ALPHA_COURT_CONTRACT_ADDRESS=0x22Cf7A9eA315e6EcE6C2BCBF60F0f656C39CCEE4
 ALPHA_COURT_SIGNER_PRIVATE_KEY=0x...   # funded Studio testnet account, backend writes only
 SURF_API_KEY=sk-surf-...               # Category A display reads only (lib/surf/display.ts)
 ```

@@ -1,6 +1,8 @@
 # Submission notes
 
-For the steward. Product facts only. Live court on GenLayer studionet (chain `61999`): **`0x8b2fF616d26Cb9bE48f4484BD5F8E7Cdaeca7902`**. Retired court (pre-payout-fix, historical ids 1–33, still readable): `0xd3cD69C30A4e899bA2D346723bffac066543cF97`.
+For the steward. Product facts only. Live court on GenLayer studionet (chain `61999`): **`0x22Cf7A9eA315e6EcE6C2BCBF60F0f656C39CCEE4`**. Two retired courts, both read-only legacy dockets: `0xd3cD69C30A4e899bA2D346723bffac066543cF97` (pre-payout-fix) and `0x8b2fF616d26Cb9bE48f4484BD5F8E7Cdaeca7902` (pre-deterministic-outcome-cross-check — see §1 and §3).
+
+**Source/bytecode match, verified explicitly:** the live address above was deployed from the exact `alpha_court.py` committed alongside this document — `_naive_outcome` and the deterministic cross-check described in §1 are live in its real bytecode, confirmed by a real resolve on this exact deployment (§3), not assumed from the source file alone. `0x8b2fF616…` was retired specifically because its deployed bytecode predated that fix and could not be patched in place (contracts aren't upgradeable) — this document never describes a safeguard on an address whose real bytecode doesn't have it.
 
 ## Prior-art check
 
@@ -72,29 +74,33 @@ Sybil Court hit the same wall on `withdraw()`. This is a platform limit, not an 
 
 | | |
 |---|---|
-| Live court | `0x8b2fF616d26Cb9bE48f4484BD5F8E7Cdaeca7902` |
-| Retired court | `0xd3cD69C30A4e899bA2D346723bffac066543cF97` |
+| Live court | `0x22Cf7A9eA315e6EcE6C2BCBF60F0f656C39CCEE4` |
+| Retired courts | `0xd3cD69C30A4e899bA2D346723bffac066543cF97`, `0x8b2fF616d26Cb9bE48f4484BD5F8E7Cdaeca7902` |
 | Network | studionet, chain `61999` |
-| Direct tests | **83** collected (`pytest test/direct/`) |
+| Direct tests | **83 passed, 0 failed** (`pytest test/direct/`) |
+| Deploy tx (live court) | `0x7abf6fd0191db9b8d7ac47f5e91572d4b7f2caacd395abc32d115c8e123c77c0` |
 
-Lifecycle on the live court (real txs, not UI labels):
+**Full lifecycle on the live court, run end-to-end after deploy** (real txs, real ~90-second real-time wait for the deadline to actually elapse, real leader + validator consensus — not a direct-mode mock):
 
 | Step | Claim | Tx |
 |---|---|---|
-| Create Price Threshold | #11 | `0xce4ea6d264d6fd9f8934ad89d01416e57c027bdd7e3126ce1e8194b5c7403d32` |
-| Create Relative Performance | #12 | `0x625b110fbea4f5d891a20525a8d8974d74b50f6890cfc80feadb44a4673a8356` |
-| Create Fundamentals (BTC MVRV) | #13 | `0xa422e238df7b4a475f4c08fafc5c5a04a3da52b2fb61ec83f1486e35f355518f` |
-| Stake FOR (wallet A, 2 GEN) | #11 | `0x04cc670ef4807adfcd39e590ac401bf5e7cb46f9486ea3591d7137019b52d2ed` |
-| Stake AGAINST (wallet B, 3 GEN) | #11 | `0xf0f8b27bd97cc95ecc5fc9fcc37bc1caf2ea25f18da0fbdf09debcf4007db82f` |
-| Keeper native payout (B won #12, +2 GEN, `getBalance` verified) | #12 | `0x5c24717cc2847ce8b9874402f95231feddb7db72c13c54f83e20050b448749ad` |
-| Keeper native payout (C won #11 share, +2 GEN, `getBalance` verified) | #11 | `0x93ea052776a13317c76151262714d0144cad5e8b8cfc78e94252011121ee9def` |
+| Create Price Threshold (`ETH/USD above 100`) | #1 | `0x0cc377b11322d88d24fd431e32f3ba5559bc8cee6bc7ef458bf9af5fcacd9d3f` |
+| Stake FOR (wallet B, 2 GEN) | #1 | `0x3e69c76df4d4388b588530230e69ada9de8d12fd6cc939225c3ea78f3858fd7f` |
+| Stake AGAINST (wallet C, 1 GEN) | #1 | `0x44f5b734b0c4276e939e83d92e0e390dc07b4d7b8d2b2df1260078d54df647f2` |
+| `lock_deadline_evidence` (real deadline elapsed) | #1 | `0x3791307af98034669d4d78cd6cefee16bcf04c8e8f6e4187e8dade5cd3c2ebf0` |
+| `resolve_verdict` → **RESOLVED, HELD** | #1 | `0xe5574313f6d4cc19e25ae0cebe82b30212736788a08234e6f098f4fc724b8ecd` |
 
-Lock + `resolve_verdict` are keeper-driven. No user-facing lock/resolve button.
+Verdict text (real leader output, deterministic cross-check engaged and did not reject it — the leader's arithmetic agreed): *"HELD. The posting-time price was 1863.43…, the deadline-time price was 1863.43…, and the threshold was 100.0. Because the claim was above 100.0 and the deadline price 1863.43… exceeds 100.0, the claim HELD."*
 
-**Retired-court payout audit** (all 16 RESOLVED/REFUNDED rows on `0xd3cD69…`, not a sample): 13 winners never received IC→EOA GEN (`Contract <eoa> not found`). Each affected winner was made whole with a keeper native send. Example: claim 31 correction `0x74d2d0ed6b0e375c61a207ffea663b72197f4e47207392f73e9f77d58b91398f` (10 GEN, winner balance 848.75 → 858.75).
+Lock + `resolve_verdict` are keeper-driven in production. No user-facing lock/resolve button.
+
+**Retired-court (`0xd3cD69…`) payout audit** (all 16 RESOLVED/REFUNDED rows, not a sample): 13 winners never received IC→EOA GEN (`Contract <eoa> not found`). Each affected winner was made whole with a keeper native send. Example: claim 31 correction `0x74d2d0ed6b0e375c61a207ffea663b72197f4e47207392f73e9f77d58b91398f` (10 GEN, winner balance 848.75 → 858.75).
+
+**Second retired court (`0x8b2fF616…`) — real payout-key collision found and fixed, not just theorized.** The payouts book matched "already paid?" on bare `claim_id` and treated a missing origin as an automatic pass. A payout row dated `2026-08-20T14:44:54Z` (1 GEN, from an earlier claim numbering) was silently satisfying that check for a claim #19 not created until `2026-08-23T03:06:12Z` — three days later, so it could not have been that claim's real payout. Fixed in `web/lib/genlayer/payouts.ts`: the origin check now fails closed, and every existing row is backfilled with its real origin (read from the transaction's own on-chain timestamp) the first time it's loaded. Full audit of every claim-id-keyed store in `web/lib/legacy-claim-ids.ts`'s header comment and this repo's commit history — payouts, the passport cache (was keyed by bare address with no origin at all), the passport `claim_history` merge, and the `?legacy=1` case-detail routing (a boolean couldn't disambiguate two retired courts) were all checked; claims and stakes already used composite `origin::id` keys and needed no change.
 
 ## Known limitations
 
 - **Keeper funding is a real ongoing dependency.** The contract has no withdraw/admin/rescue method (schema audit). Every payout needs the keeper wallet funded. Acceptable on testnet (faucet). Would need re-architecture before real-money use.
 - **GLSim local integration tests are blocked** by an upstream tool bug ([genlayerlabs/genlayer-studio#1727](https://github.com/genlayerlabs/genlayer-studio/issues/1727)). Direct-mode tests and the live studionet deployment are independent of that. The live court is proven with on-chain txs above.
 - **Live `CONTESTED` cannot be reliably forced** on a public validator set for a demo. The appeal path is fully proven in direct-mode tests, where disagreement can be simulated deterministically (`test/direct/test_appeals.py`, 15 tests).
+- **8 tests were previously red and are now fixed, not just documented.** They asserted a contract-level native balance change after `resolve_verdict`/`resolve_appeal`/`expire_appeal` alone — stale expectations from before `_pay_native` became the documented, intentional no-op it is today. Fixed to assert the real current contract behavior (no balance moves at the contract level; the payout/refund/bond formula is still verified against real on-chain stake data) instead of silently tolerating red tests or deleting coverage.

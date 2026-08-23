@@ -7,12 +7,14 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const preferLegacy = new URL(req.url).searchParams.get("legacy") === "1";
+  const url = new URL(req.url);
+  const preferLegacy = url.searchParams.get("legacy") === "1";
+  const origin = url.searchParams.get("origin");
   if (!isOnChainClaimId(id)) {
     return NextResponse.json({ stakers: [], winningSide: null });
   }
   try {
-    const data = await stakersForClaim(id, { preferLegacy });
+    const data = await stakersForClaim(id, { preferLegacy, origin });
     return NextResponse.json(data);
   } catch (err) {
     return NextResponse.json(

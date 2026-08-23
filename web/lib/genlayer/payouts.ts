@@ -1,7 +1,7 @@
 import "server-only";
 import { attoToGenString } from "./atto";
 import { readTransaction } from "./client";
-import { currentCourtAddress } from "../legacy-claim-ids";
+import { currentCourtAddress, originOf } from "../legacy-claim-ids";
 import { hashLoad, hashSet, parseField } from "../persist";
 
 export type PayoutTransfer = {
@@ -16,6 +16,32 @@ export type PayoutTransfer = {
   originContract?: string;
 };
 
+/**
+ * Backfills originContract on payout rows written before that field
+ * existed. Without a real origin, `t.claimId === "19"` can match a row from
+ * a completely different court's own claim #19 -- a real incident (see the
+ * claim #19 payout-key-collision investigation this session). The row's
+ * txHash is a real on-chain hash, so its real created_at is fetchable and
+ * gives an exact answer via the same originOf() cutoff logic every other
+ * store uses, rather than a guess. Self-healing: once a row has
+ * originContract, it's never re-fetched.
+ */
+async function migrateOriginlessPayouts(transfers: PayoutTransfer[]): Promise<boolean> {
+  let changed = false;
+  for (const row of transfers) {
+    if (row.originContract) continue;
+    try {
+      const tx = (await readTransaction(row.txHash)) as { created_at?: string };
+      row.originContract = originOf({ claim_id: row.claimId, created_at: tx.created_at }).toLowerCase();
+      await upsertTransfer(row);
+      changed = true;
+    } catch {
+      /* real chain read failed transiently; retry on the next load */
+    }
+  }
+  return changed;
+}
+
 async function loadTransfers(): Promise<PayoutTransfer[]> {
   const fields = await hashLoad("payouts");
   const transfers: PayoutTransfer[] = [];
@@ -23,6 +49,7 @@ async function loadTransfers(): Promise<PayoutTransfer[]> {
     const row = parseField<PayoutTransfer | null>(raw, null);
     if (row?.txHash) transfers.push(row);
   }
+  await migrateOriginlessPayouts(transfers);
   return transfers;
 }
 
@@ -35,15 +62,23 @@ export async function payoutsFor(
   const originKey = originContract ? originContract.toLowerCase() : "";
   return (await loadTransfers()).filter((t) => {
     if (t.to !== addr || t.claimId !== claimId) return false;
-    if (!originKey || !t.originContract) return true;
-    return t.originContract.toLowerCase() === originKey;
+    // Caller didn't ask to scope by origin -- match on claimId alone.
+    if (!originKey) return true;
+    // Caller DID ask to scope by origin: a row with no known origin (or a
+    // different one) is NOT a match. A missing origin used to auto-pass
+    // here -- that fail-open behavior is exactly what let an unrelated
+    // court's same-numbered claim satisfy an "already paid?" check.
+    return (t.originContract ?? "").toLowerCase() === originKey;
   });
 }
 
-export async function payoutAddressesForClaim(claimId: string): Promise<string[]> {
+export async function payoutAddressesForClaim(claimId: string, originContract?: string | null): Promise<string[]> {
+  const originKey = originContract ? originContract.toLowerCase() : "";
   const seen = new Set<string>();
   for (const t of await loadTransfers()) {
-    if (t.claimId === claimId) seen.add(t.to);
+    if (t.claimId !== claimId) continue;
+    if (originKey && (t.originContract ?? "").toLowerCase() !== originKey) continue;
+    seen.add(t.to);
   }
   return [...seen];
 }

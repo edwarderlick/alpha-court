@@ -1,15 +1,19 @@
 import "server-only";
 import { bookAll } from "./book";
 import type { OnChainPassport } from "./passport";
-import { isLegacyClaim } from "../legacy-claim-ids";
+import { claimRowKey, isLegacyClaim } from "../legacy-claim-ids";
 
-/** Claimant stats from the retired court, merged so Passport still shows real history. */
+/** Claimant stats from the retired courts, merged so Passport still shows real history. */
 export async function legacyPassportFromBook(address: string): Promise<OnChainPassport> {
   const addr = address.toLowerCase();
   const claims = (await bookAll()).filter(
     (c) => isLegacyClaim(c) && c.poster && c.poster.toLowerCase() === addr
   );
-  const history = claims.map((c) => c.claim_id);
+  // origin::id, not bare claim_id -- two retired courts (and the live one)
+  // can and do reuse the same numeric ids. A bare id here would let
+  // mergePassports' Set-based dedup below silently collapse two genuinely
+  // different claims into one, dropping a real history entry.
+  const history = claims.map((c) => claimRowKey(c));
   const resolved = claims.filter((c) => c.state === "RESOLVED" || c.state === "REFUNDED");
   let win_count = 0;
   let loss_count = 0;

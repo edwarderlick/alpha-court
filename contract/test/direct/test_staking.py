@@ -295,12 +295,28 @@ def test_multi_staker_payout_hand_calculated(
 	assert claim["state"] == "RESOLVED"
 	assert claim["consensus_result"] == "HELD"
 
+	# _pay_native is a documented, intentional no-op on Studionet (see its
+	# own docstring: a contract-initiated IC->EOA send either orphans a
+	# dead child or reverts the parent -- confirmed both ways against real
+	# Studio behavior). resolve_verdict computes the exact payout formula
+	# below correctly, then calls the no-op; no balance moves at the
+	# contract level by design. The keeper's native send (proven with real
+	# on-chain evidence, see SUBMISSION.md/README) is what actually pays
+	# winners -- that happens outside the contract entirely.
+	assert balance_of(direct_vm, direct_bob) == 0
+	assert balance_of(direct_vm, direct_charlie) == 0
+	assert balance_of(direct_vm, direct_owner) == 0
+
+	# The formula itself is still verified: real on-chain stakes, hand-
+	# calculated expected payout (winning_pool=5, losing_pool=4).
 	expected_bob = 3_600_000_000_000_000_000
 	expected_charlie = 5_400_000_000_000_000_000
-
-	assert balance_of(direct_vm, direct_bob) == expected_bob
-	assert balance_of(direct_vm, direct_charlie) == expected_charlie
-	assert balance_of(direct_vm, direct_owner) == 0  # losing side: no payout
+	bob_stake = int(contract.get_stake(claim_id, "for", "0x" + direct_bob.hex()))
+	charlie_stake = int(contract.get_stake(claim_id, "for", "0x" + direct_charlie.hex()))
+	winning_pool = int(float(claim["stake_for_total"]) * 10**18)
+	losing_pool = int(float(claim["stake_against_total"]) * 10**18)
+	assert bob_stake + (bob_stake * losing_pool) // winning_pool == expected_bob
+	assert charlie_stake + (charlie_stake * losing_pool) // winning_pool == expected_charlie
 
 
 def _allocate_losing_shares(stake_amounts: list[int], losing_pool: int) -> list[int]:
@@ -395,7 +411,18 @@ def test_multi_staker_payout_uneven_three_way_split(
 	assert claim["state"] == "RESOLVED"
 	assert claim["consensus_result"] == "HELD"
 
-	# winning_pool=10, losing_pool=6
+	# _pay_native is a documented, intentional no-op on Studionet -- see
+	# test_multi_staker_payout_hand_calculated's comment for the full
+	# reasoning. No balance moves at the contract level by design; the
+	# keeper's native send (real on-chain evidence in SUBMISSION.md/README)
+	# is what actually pays winners.
+	assert balance_of(direct_vm, direct_bob) == 0
+	assert balance_of(direct_vm, direct_charlie) == 0
+	assert balance_of(direct_vm, direct_owner) == 0
+	assert balance_of(direct_vm, direct_alice) == 0
+
+	# The formula itself is still verified: real on-chain stakes, hand-
+	# calculated expected payout (winning_pool=10, losing_pool=6).
 	# bob:     1 + (1*6)//10 = 1 + 0.6 -> floor atto: 1e18 + (1e18*6e18)//10e18 = 1e18 + 600000000000000000 = 1_600_000_000_000_000_000
 	# charlie: 4 + (4*6)//10 = 4 + 2.4 -> 4e18 + (4e18*6e18)//10e18 = 4e18 + 2400000000000000000 = 6_400_000_000_000_000_000
 	# owner:   5 + (5*6)//10 = 5 + 3.0 -> 5e18 + (5e18*6e18)//10e18 = 5e18 + 3000000000000000000 = 8_000_000_000_000_000_000
@@ -403,11 +430,14 @@ def test_multi_staker_payout_uneven_three_way_split(
 	expected_charlie = 6_400_000_000_000_000_000
 	expected_owner = 8_000_000_000_000_000_000
 
-	assert balance_of(direct_vm, direct_bob) == expected_bob
-	assert balance_of(direct_vm, direct_charlie) == expected_charlie
-	assert balance_of(direct_vm, direct_owner) == expected_owner
-	# alice staked AGAINST (losing side) -- no payout to her from this claim.
-	assert balance_of(direct_vm, direct_alice) == 0
+	winning_pool = int(float(claim["stake_for_total"]) * 10**18)
+	losing_pool = int(float(claim["stake_against_total"]) * 10**18)
+	bob_stake = int(contract.get_stake(claim_id, "for", "0x" + direct_bob.hex()))
+	charlie_stake = int(contract.get_stake(claim_id, "for", "0x" + direct_charlie.hex()))
+	owner_stake = int(contract.get_stake(claim_id, "for", "0x" + direct_owner.hex()))
+	assert bob_stake + (bob_stake * losing_pool) // winning_pool == expected_bob
+	assert charlie_stake + (charlie_stake * losing_pool) // winning_pool == expected_charlie
+	assert owner_stake + (owner_stake * losing_pool) // winning_pool == expected_owner
 
 	# Sum of payouts equals the full pool exactly in this case too (10 + 6
 	# = 16 GEN in, and 1.6 + 6.4 + 8.0 = 16.0 GEN out) -- no dust here

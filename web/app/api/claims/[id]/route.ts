@@ -18,7 +18,8 @@ export async function GET(
 ) {
   const { id } = await params;
   const preferLegacy = req.nextUrl.searchParams.get("legacy") === "1";
-  const booked = await bookGet(id, { preferLegacy });
+  const origin = req.nextUrl.searchParams.get("origin");
+  const booked = await bookGet(id, { preferLegacy, origin });
   if (!isOnChainClaimId(id)) {
     if (booked) return NextResponse.json({ claim: booked, pending: true });
     return NextResponse.json({ error: "not an on-chain claim id" }, { status: 400 });

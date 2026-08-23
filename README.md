@@ -9,7 +9,7 @@
 
 **Live demo:** [alpha-court.vercel.app](https://alpha-court.vercel.app)
 
-Live Studionet court (chain `61999`): [`0x8b2fF616d26Cb9bE48f4484BD5F8E7Cdaeca7902`](https://studio.genlayer.com)
+Live Studionet court (chain `61999`): [`0x22Cf7A9eA315e6EcE6C2BCBF60F0f656C39CCEE4`](https://studio.genlayer.com)
 
 Alpha Court is a prediction-market court. A claim is a timed, staked question about the world. Validators freeze public evidence at the deadline and try to agree **HELD** or **BROKEN**. If they cannot agree, the claim is **CONTESTED**: a 48-hour appeal window, then a second consensus round or a refund.
 
@@ -36,7 +36,14 @@ Jump to: [Critical platform reality](#critical-platform-reality) · [What Alpha 
 
 The UI says **Paid** / **Returned** only after a keeper send has **increased the wallet balance**. That split is intentional. This repo does not claim trustless or automatic *payout*.
 
-Retired court (do not settle): `0xd3cD69C30A4e899bA2D346723bffac066543cF97`. Historical unpaid winners on that deployment are a known leftover from an earlier pass; only claim 31 was made whole there.
+**Two retired courts (do not settle on either — legacy docket, read-only):**
+
+| Address | Retired because |
+|---|---|
+| `0xd3cD69C30A4e899bA2D346723bffac066543cF97` | Superseded by the second deployment below. Historical unpaid winners are a known leftover from an earlier pass; only claim 31 was made whole there. |
+| `0x8b2fF616d26Cb9bE48f4484BD5F8E7Cdaeca7902` | Source and deployed bytecode drifted apart: the deterministic outcome cross-check (`_naive_outcome`, closing a FairSplit-shaped consensus gap) was added to `alpha_court.py` after this deployment, so its live bytecode never had the fix. Redeployed fresh rather than patched in place — a contract can't be upgraded after the fact. Its 22 settled claims are preserved and still readable through the same legacy-docket merge this app already used for the first retirement. |
+
+Claim ids restart from 1 on every new deployment, so every store that looks claims up by id is keyed by `origin_contract::claim_id`, never a bare id — see `web/lib/legacy-claim-ids.ts`.
 
 ---
 
@@ -288,6 +295,7 @@ Pushes to `main` deploy production via [`.github/workflows/deploy.yml`](./.githu
 - Studio IC→EOA `emit_transfer` children fail (`Contract <eoa> not found`). That is why `_pay_native` is a no-op.
 - Retired-court unpaid winners (claims 18–19, 21, 24–30, 32–33 on `0xd3cD69…`) were **not** all auto-repaid. Claim 31 was made whole with a keeper native send.
 - There has been **no committed `REFUNDED` outcome** on either court as of the refund-path audit. The drain pass exists so a future refund cannot sit unpaid.
+- **A real payout-key collision was found and fixed.** The payouts book's "already paid?" check matched on bare `claim_id` and treated a missing `originContract` as an automatic pass. Claim ids restart from 1 on every redeploy, so an old, unrelated payout row could satisfy the check for a same-numbered claim on a different court (confirmed real: a 2026-08-20 row was silently blocking claim #19's real payout on the second deployment, created three days later). Fixed in `web/lib/genlayer/payouts.ts` — the origin check now fails closed, and existing rows are backfilled with their real origin (from the transaction's own on-chain timestamp) the first time they're read.
 
 ---
 

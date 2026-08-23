@@ -15,6 +15,16 @@ Alpha Court is a prediction-market court. A claim is a timed, staked question ab
 
 ---
 
+## At a glance
+
+- **The loop:** post a claim → others stake GEN for or against it → at the deadline, evidence gets frozen → GenLayer validators reach consensus on HELD or BROKEN (or the claim is CONTESTED and goes to appeal) → winners get paid.
+- **Three claim types today:** a price crossing a threshold, one asset outperforming another, or an on-chain/DeFi metric crossing a threshold.
+- **The one thing worth knowing before anything else:** GenLayer Studio can't yet send native GEN from a contract straight to a wallet, so a backend keeper does that last step, checked against a real balance increase before the UI ever says "Paid." That split is explained in full immediately below — it's a platform limit, not something papered over.
+
+Jump to: [Critical platform reality](#critical-platform-reality) · [What Alpha Court is](#what-alpha-court-is) · [Architecture](#architecture) · [Local development](#local-development) · [Honesty and known limits](#honesty-and-known-limits) · [Roadmap](#roadmap--not-yet-built)
+
+---
+
 ## Critical platform reality
 
 **GenLayer Studio cannot execute a contract-initiated native transfer to a plain wallet (EOA).**
@@ -295,6 +305,18 @@ Adversarial passes closed:
 | Residual drain + sort | Unpaid `REFUNDED` drained every tick; remainder key is sorted address |
 
 Ready for GenLayer review.
+
+---
+
+## Roadmap — Not Yet Built
+
+**Nothing in this section exists in the code today.** It's here because Alpha Court is a real product with real room to grow, not a finished demo — worth stating plainly rather than leaving unsaid. Everything above this section is the actual, current, shipped state; everything below is direction, not a promise or a committed timeline.
+
+- **More claim types and market categories.** Today's three types (price threshold, relative performance, fundamentals) are all crypto-price-shaped. The claim/verdict machinery underneath is general — a sports result, a macro print, a real-world event, or a poll outcome fits the same OPEN → EVIDENCE_LOCKED → RESOLVED shape with a different evidence source.
+- **Deeper gamification.** The app already has avatars, win/create fanfare, and a kinetic landing page. Natural next steps: staking/winning streaks, account levels, a leaderboard with real depth (categories, time windows, head-to-head records) instead of a single ranking, seasonal or themed dockets, and badges tied to real on-chain history via the Passport.
+- **Richer prediction-market mechanics.** The current payout formula is a flat proportional split of the losing pool. As the product matures: dynamic pricing/odds as stakes come in, deeper liquidity mechanics, and market discovery (search, filters, trending dockets) instead of a single chronological list.
+- **Removing the keeper dependency.** The keeper exists because Studio can't do a contract-initiated native transfer to a wallet yet (see "Critical platform reality" above). If that platform limit is ever lifted, payouts could become genuinely trustless end-to-end instead of contract-decides-keeper-sends.
+- **Broader community/governance input** on which claim categories get curated or featured, rather than a single operator's judgment call.
 
 ---
 

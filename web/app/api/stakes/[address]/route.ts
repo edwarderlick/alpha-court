@@ -10,13 +10,13 @@ export async function GET(
     return NextResponse.json({ error: "address required" }, { status: 400 });
   }
   try {
-    const cached = stakeRowsFromCache(address);
-    const record = stakeRecordFromCache(address);
+    const cached = await stakeRowsFromCache(address);
+    const record = await stakeRecordFromCache(address);
     if (cached.length > 0) {
       return NextResponse.json({ stakes: cached, record, source: "cache" });
     }
     const stakes = await stakesForAddress(address);
-    return NextResponse.json({ stakes, record: stakeRecordFromCache(address), source: "live" });
+    return NextResponse.json({ stakes, record: await stakeRecordFromCache(address), source: "live" });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },

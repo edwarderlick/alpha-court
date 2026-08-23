@@ -1,9 +1,8 @@
 import "server-only";
-import { mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
-import { dirname, join } from "path";
 import { attoToGenString } from "./atto";
 import { readTransaction } from "./client";
 import { currentCourtAddress } from "../legacy-claim-ids";
+import { hashLoad, hashSet, parseField } from "../persist";
 
 export type PayoutTransfer = {
   claimId: string;
@@ -17,76 +16,44 @@ export type PayoutTransfer = {
   originContract?: string;
 };
 
-type File = { transfers: PayoutTransfer[] };
-
-const FILE = join(process.cwd(), ".data", "payouts-book.json");
-
-let mem: File | null = null;
-let memMtime = 0;
-
-function empty(): File {
-  return { transfers: [] };
-}
-
-function load(): File {
-  try {
-    const mtime = statSync(FILE).mtimeMs;
-    if (mem && mtime === memMtime) return mem;
-    const parsed = JSON.parse(readFileSync(FILE, "utf8")) as File;
-    mem = { transfers: Array.isArray(parsed.transfers) ? parsed.transfers : [] };
-    memMtime = mtime;
-    return mem;
-  } catch {
-    mem = empty();
-    return mem;
+async function loadTransfers(): Promise<PayoutTransfer[]> {
+  const fields = await hashLoad("payouts");
+  const transfers: PayoutTransfer[] = [];
+  for (const raw of Object.values(fields)) {
+    const row = parseField<PayoutTransfer | null>(raw, null);
+    if (row?.txHash) transfers.push(row);
   }
+  return transfers;
 }
 
-function persist() {
-  const data = load();
-  mkdirSync(dirname(FILE), { recursive: true });
-  writeFileSync(FILE, JSON.stringify(data, null, 2));
-  try {
-    memMtime = statSync(FILE).mtimeMs;
-  } catch {
-    /* ignore */
-  }
-}
-
-export function payoutsFor(
+export async function payoutsFor(
   address: string,
   claimId: string,
   originContract?: string | null
-): PayoutTransfer[] {
+): Promise<PayoutTransfer[]> {
   const addr = address.toLowerCase();
   const originKey = originContract ? originContract.toLowerCase() : "";
-  return load().transfers.filter((t) => {
+  return (await loadTransfers()).filter((t) => {
     if (t.to !== addr || t.claimId !== claimId) return false;
     if (!originKey || !t.originContract) return true;
     return t.originContract.toLowerCase() === originKey;
   });
 }
 
-export function payoutAddressesForClaim(claimId: string): string[] {
+export async function payoutAddressesForClaim(claimId: string): Promise<string[]> {
   const seen = new Set<string>();
-  for (const t of load().transfers) {
+  for (const t of await loadTransfers()) {
     if (t.claimId === claimId) seen.add(t.to);
   }
   return [...seen];
 }
 
-export function recordPayout(row: PayoutTransfer) {
-  upsertTransfer(row);
+export async function recordPayout(row: PayoutTransfer) {
+  await upsertTransfer(row);
 }
 
-function upsertTransfer(row: PayoutTransfer) {
-  const data = load();
-  data.transfers = [
-    row,
-    ...data.transfers.filter((t) => t.txHash.toLowerCase() !== row.txHash.toLowerCase()),
-  ];
-  mem = data;
-  persist();
+async function upsertTransfer(row: PayoutTransfer) {
+  await hashSet("payouts", row.txHash.toLowerCase(), row);
 }
 
 function triggeredHashes(receipt: unknown): string[] {
@@ -142,15 +109,16 @@ export async function indexTriggeredTransfers(opts: {
 
 /** Flip booked successes that were never a real credit (self-send / NO_MAJORITY). */
 export async function reclassifyUnverifiedPayouts(): Promise<number> {
-  const data = load();
+  const transfers = await loadTransfers();
   let flipped = 0;
   let inspected = 0;
-  for (const row of data.transfers) {
+  for (const row of transfers) {
     if (!row.credited) continue;
     if (inspected >= 12) break;
     inspected += 1;
     if (!row.txHash?.startsWith("0x")) {
       row.credited = false;
+      await upsertTransfer(row);
       flipped += 1;
       continue;
     }
@@ -170,15 +138,12 @@ export async function reclassifyUnverifiedPayouts(): Promise<number> {
       // and false on real third-party credits.
       if (from && to && from === to && row.credited) {
         row.credited = false;
+        await upsertTransfer(row);
         flipped += 1;
       }
     } catch {
       /* leave until Studio can answer */
     }
-  }
-  if (flipped > 0) {
-    mem = data;
-    persist();
   }
   return flipped;
 }

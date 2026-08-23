@@ -13,7 +13,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "bad body" }, { status: 400 });
   }
   const originContract = typeof body.originContract === "string" ? body.originContract : "";
-  rememberStakePosition({
+  await rememberStakePosition({
     address,
     claimId,
     side,

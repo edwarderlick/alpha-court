@@ -18,7 +18,7 @@ export async function GET(
 ) {
   const { id } = await params;
   const preferLegacy = req.nextUrl.searchParams.get("legacy") === "1";
-  const booked = bookGet(id, { preferLegacy });
+  const booked = await bookGet(id, { preferLegacy });
   if (!isOnChainClaimId(id)) {
     if (booked) return NextResponse.json({ claim: booked, pending: true });
     return NextResponse.json({ error: "not an on-chain claim id" }, { status: 400 });
@@ -39,12 +39,12 @@ export async function GET(
   try {
     const claim = (await readOneClaim(id)) as ClaimSummary;
     noteClaimChainRead(id);
-    bookUpsert(claim);
+    await bookUpsert(claim);
     return NextResponse.json({ claim, studio: studioStatus() });
   } catch (err) {
     if (booked) return NextResponse.json({ claim: booked, cached: true, studio: studioStatus() });
     const detail = err instanceof Error ? err.message : String(err);
-    const known = bookAll()
+    const known = (await bookAll())
       .map((c) => Number(c.claim_id))
       .filter((n) => Number.isFinite(n));
     const maxKnown = known.length ? Math.max(...known) : 0;

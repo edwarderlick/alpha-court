@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getLastKeeperTick, keeperEnabled, keeperMinClaimId, runKeeperTick } from "@/lib/genlayer/keeper";
 
+export const maxDuration = 300;
+
 function authorized(req: NextRequest): boolean {
   const header = req.headers.get("authorization") ?? "";
   const keeper = process.env.KEEPER_SECRET;

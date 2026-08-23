@@ -15,7 +15,7 @@ export type { ClaimSummary };
  * existing order.
  */
 export async function getAllClaims(): Promise<ClaimSummary[]> {
-  const book = bookAll();
+  const book = await bookAll();
   // A full list_claims + get_claim-per-id refresh is tens of Studio reads.
   // The book is upserted by the keeper and by one-id polls; serve it.
   if (book.length > 0) return book;
@@ -24,7 +24,7 @@ export async function getAllClaims(): Promise<ClaimSummary[]> {
     const ids = (await readClaim("list_claims")) as string[];
     const claims = await mapPool(ids, 2, (id) => readClaim("get_claim", [id]) as Promise<ClaimSummary>);
     const newestFirst = claims.reverse();
-    bookReplace(newestFirst);
+    await bookReplace(newestFirst);
     return newestFirst;
   } catch (err) {
     studioNoteError(err, "read");
@@ -37,7 +37,7 @@ export async function getAllClaimsSafe(): Promise<ClaimSummary[]> {
   try {
     return await getAllClaims();
   } catch {
-    return bookAll();
+    return await bookAll();
   }
 }
 
@@ -57,7 +57,7 @@ export async function getLandingBundle(): Promise<{ claims: ClaimSummary[]; tota
     const claims = await getAllClaimsSafe();
     return { claims, total: claims.length };
   } catch {
-    const stale = bookAll();
+    const stale = await bookAll();
     return { claims: stale, total: stale.length };
   }
 }

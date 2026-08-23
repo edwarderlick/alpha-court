@@ -47,11 +47,11 @@ export async function POST(req: NextRequest) {
     const { txHash } = await writeAsKeeper(fn, [claimId]);
     try {
       const live = (await readClaimRaw("get_claim", [claimId], { bypass: true })) as ClaimSummary;
-      bookUpsert(live);
+      await bookUpsert(live);
     } catch {
-      const existing = bookGet(claimId);
+      const existing = await bookGet(claimId);
       if (existing) {
-        bookUpsert({
+        await bookUpsert({
           ...existing,
           state:
             action === "lock"

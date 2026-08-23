@@ -21,7 +21,7 @@ export async function POST(req: NextRequest) {
     if (poster && (claim.poster || "").toLowerCase() !== poster) {
       return NextResponse.json({ error: "newest claim is not yours", claimId: newest }, { status: 409 });
     }
-    bookUpsert(claim);
+    await bookUpsert(claim);
     return NextResponse.json({ claim });
   } catch (err) {
     return NextResponse.json(

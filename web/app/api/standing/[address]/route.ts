@@ -9,5 +9,5 @@ export async function GET(
   if (!address || !address.startsWith("0x")) {
     return NextResponse.json({ error: "address required" }, { status: 400 });
   }
-  return NextResponse.json(stakeRecordFromCache(address));
+  return NextResponse.json(await stakeRecordFromCache(address));
 }

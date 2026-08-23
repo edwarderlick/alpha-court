@@ -120,7 +120,7 @@ flowchart TD
   E --> D
 ```
 
-On a long-lived Node process (`next dev` / `next start`), the keeper also runs `setInterval`. On Vercel that interval does not survive; production ticks are `GET` / `POST /api/keeper/tick` (Cron).
+On a long-lived Node process (`next dev` / `next start`), the keeper also runs `setInterval` (default 60s). **Production ticks are not Vercel Cron.** Hobby serverless functions time out at 10 seconds; a Studio consensus write takes longer. Production cadence is a GitHub Actions job (`.github/workflows/keeper.yml`) that runs `npm run keeper` on a Linux runner about **once a minute** (GitHub may delay under load). That process uses the same contract, the same keeper key, and the same Redis book as the Next.js app.
 
 ---
 
@@ -142,6 +142,8 @@ On a long-lived Node process (`next dev` / `next start`), the keeper also runs `
 ---
 
 ## Keeper cycle in detail
+
+**Production evidence:** GitHub Actions workflow `Keeper tick`, scheduled `* * * * *`. Manual run: Actions → Keeper tick → Run workflow.
 
 Every tick, when `KEEPER_ENABLED=true` and Studio is not in cooldown (max one of each write per tick):
 
@@ -171,6 +173,7 @@ Human fallbacks remain permissionless on-chain. The drain pass is what stops ref
 | Layer | Stack |
 |---|---|
 | App | Next.js 16 App Router, React 19, TypeScript, Tailwind |
+| Book | Upstash Redis (REST hashes). Local fallback: `.data/` JSON, never on Vercel. |
 | Chain | GenLayer Intelligent Contract (Python), Studionet |
 | Wallet | `genlayer-js` + browser wallet (MetaMask) |
 | Evidence | Surf API (display + contract consensus fetches) |
@@ -224,7 +227,7 @@ KEEPER_MIN_CLAIM_ID=1
 KEEPER_INTERVAL_MS=60000
 ```
 
-Restart `next dev`. Status: `GET /api/keeper/tick`. Manual pass: `POST /api/keeper/tick` with `Authorization: Bearer $KEEPER_SECRET` if that secret is set.
+Restart `next dev`. Status: `GET /api/keeper/tick`. Manual pass: `POST /api/keeper/tick` with `Authorization: Bearer $KEEPER_SECRET` if that secret is set, or `npm run keeper` (same code GitHub Actions runs).
 
 ### Keeper cycle unit tests
 
@@ -254,9 +257,15 @@ Copy `web/.env.example`. **Do not put real keys in git or in this README.**
 | `KEEPER_MIN_CLAIM_ID` | server | Skip older test dockets |
 | `KEEPER_INTERVAL_MS` | server | Local `setInterval` period (ignored on Vercel) |
 | `KEEPER_SECRET` | server | Bearer token for `/api/keeper/tick` |
-| `CRON_SECRET` | server | Vercel Cron `Authorization: Bearer` |
+| `CRON_SECRET` | server | Optional Bearer for `/api/keeper/tick` |
+| `UPSTASH_REDIS_REST_URL` | server | Redis REST endpoint. **Required on Vercel.** |
+| `UPSTASH_REDIS_REST_TOKEN` | server | Redis REST token. **Required on Vercel.** |
 
-On Vercel, set **Root Directory** to `web`. Serverless does not keep `setInterval`; Cron hits `GET /api/keeper/tick`. This project's `vercel.json` is set to **once per day** (`0 0 * * *`) so a Hobby account can deploy. Pro unlocks hourly ticks.
+On Vercel, set **Root Directory** to `web`. The app **never writes `.data/`** there (read-only FS except `/tmp`). Claims book, stake positions, payouts, and passport cache live in Redis hashes (`ac:claims`, `ac:stakes`, `ac:payouts`, `ac:passports`) so a stake on one serverless instance is visible on the next.
+
+**Keeper cadence in production is GitHub Actions (~1 minute), not Vercel Cron.** Hobby functions cannot wait for Studio consensus.
+
+The current Redis instance is an Upstash start-redis database. **Claim it** (or replace the env vars with your own free Upstash DB) so it does not expire: [Upstash console](https://upstash.com/start-redis/console/f4860a45-906a-4848-9cb6-766b88bd8904).
 
 Pushes to `main` deploy production via [`.github/workflows/deploy.yml`](./.github/workflows/deploy.yml). GitHub Actions needs three repository secrets: `VERCEL_TOKEN` (create at [vercel.com/account/tokens](https://vercel.com/account/tokens)), `VERCEL_ORG_ID`, and `VERCEL_PROJECT_ID`. Native Vercel GitHub App linking also works if you install the [Vercel GitHub App](https://github.com/apps/vercel) on this repo and set Root Directory to `web`.
 

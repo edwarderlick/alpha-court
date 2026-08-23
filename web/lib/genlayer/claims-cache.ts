@@ -3,18 +3,18 @@ import { bookAll, bookGet, bookReplace, bookUpsert } from "./book";
 
 /** Compatibility wrappers. The book is the only store. */
 
-export function getCachedClaims(): ClaimSummary[] | null {
-  const rows = bookAll();
+export async function getCachedClaims(): Promise<ClaimSummary[] | null> {
+  const rows = await bookAll();
   return rows.length > 0 ? rows : null;
 }
 
-export function getStaleClaims(): ClaimSummary[] | null {
-  const rows = bookAll();
+export async function getStaleClaims(): Promise<ClaimSummary[] | null> {
+  const rows = await bookAll();
   return rows.length > 0 ? rows : null;
 }
 
-export function setCachedClaims(claims: ClaimSummary[]) {
-  bookReplace(claims);
+export async function setCachedClaims(claims: ClaimSummary[]) {
+  await bookReplace(claims);
 }
 
 export function bustClaimsCache() {
@@ -22,10 +22,10 @@ export function bustClaimsCache() {
   // is what made Markets go blank while the claim was already on-chain.
 }
 
-export function rememberClaim(claim: ClaimSummary) {
-  bookUpsert(claim);
+export async function rememberClaim(claim: ClaimSummary) {
+  await bookUpsert(claim);
 }
 
-export function findCachedClaim(id: string, opts?: { preferLegacy?: boolean }): ClaimSummary | null {
+export async function findCachedClaim(id: string, opts?: { preferLegacy?: boolean }): Promise<ClaimSummary | null> {
   return bookGet(id, opts);
 }

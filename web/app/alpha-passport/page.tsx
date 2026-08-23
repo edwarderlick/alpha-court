@@ -37,13 +37,16 @@ export default async function AlphaPassportPage({
     }
   }
   const passport: Passport | null = targetAddress
-    ? mergePassports(targetAddress, livePassport)
+    ? await mergePassports(targetAddress, livePassport)
     : null;
-  const stakeRows = targetAddress ? stakeRowsFromCache(targetAddress) : [];
-  const stakeRecord = targetAddress ? stakeRecordFromCache(targetAddress) : null;
+  const stakeRows = targetAddress ? await stakeRowsFromCache(targetAddress) : [];
+  const stakeRecord = targetAddress ? await stakeRecordFromCache(targetAddress) : null;
 
   const total = passport ? passport.win_count + passport.loss_count : 0;
   const winRate = passport && total > 0 ? Math.round((passport.win_count / total) * 100) : null;
+  const postedClaims = targetAddress
+    ? (await bookAll()).filter((c) => (c.poster || "").toLowerCase() === targetAddress.toLowerCase())
+    : [];
 
   return (
     <AppShell activeTop="Passport" activeSide="Passport">
@@ -142,9 +145,7 @@ export default async function AlphaPassportPage({
         <div className="bg-surface-container-lowest border border-white/10 p-6 rounded-xl">
           <div className="font-label-mono-bold text-label-mono-bold text-on-surface uppercase mb-4">Claim history</div>
           {(() => {
-            const posted = bookAll().filter(
-              (c) => (c.poster || "").toLowerCase() === targetAddress.toLowerCase()
-            );
+            const posted = postedClaims;
             if (posted.length === 0 && passport.claim_history.length === 0) {
               return <p className="font-body-md text-body-md text-on-surface-variant">No claims yet.</p>;
             }

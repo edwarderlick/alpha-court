@@ -48,7 +48,7 @@ export async function creditResolvedWinners(
   claimId: string,
   parentTx: string
 ): Promise<PayoutTransfer[]> {
-  const claim = bookGet(claimId);
+  const claim = await bookGet(claimId);
   if (!claim || claim.state !== "RESOLVED") return [];
   const side = winningSide(claim.consensus_result);
   if (!side) return [];
@@ -59,7 +59,7 @@ export async function creditResolvedWinners(
 
   const claimOrigin = (claim.origin_contract || originOf(claim) || currentCourtAddress()).toLowerCase();
   const keeper = (keeperAddress() || "").toLowerCase();
-  const pos = allStakePositions().positions;
+  const pos = (await allStakePositions()).positions;
   const winners = new Map<string, bigint>();
   for (const [key, row] of Object.entries(pos)) {
     const parsed = parsePosKey(key);
@@ -76,7 +76,7 @@ export async function creditResolvedWinners(
   for (let i = 0; i < addrs.length; i++) {
     const addr = addrs[i]!;
     const stake = winners.get(addr)!;
-    const already = payoutsFor(addr, claimId, claimOrigin).some((t) => t.kind === "payout");
+    const already = (await payoutsFor(addr, claimId, claimOrigin)).some((t) => t.kind === "payout");
     if (already) {
       const share = (stake * losePool) / winPool;
       losingLeft -= share;
@@ -105,7 +105,7 @@ export async function creditResolvedWinners(
   if (extra.appeal_outcome === "SETTLED" && extra.appeal_filer && extra.appeal_bond) {
     const bond = genStringToAtto(extra.appeal_bond);
     const filer = extra.appeal_filer.toLowerCase();
-    if (bond > 0n && !payoutsFor(filer, claimId, claimOrigin).some((t) => t.kind === "refund" && t.to === filer)) {
+    if (bond > 0n && !(await payoutsFor(filer, claimId, claimOrigin)).some((t) => t.kind === "refund" && t.to === filer)) {
       credited.push(await creditOne({
         claimId,
         to: filer,
@@ -129,7 +129,7 @@ export async function creditRefundedStakers(
   claimId: string,
   parentTx: string
 ): Promise<PayoutTransfer[]> {
-  const claim = bookGet(claimId);
+  const claim = await bookGet(claimId);
   if (!claim || claim.state !== "REFUNDED") return [];
 
   const claimOrigin = (claim.origin_contract || originOf(claim) || currentCourtAddress()).toLowerCase();
@@ -138,7 +138,7 @@ export async function creditRefundedStakers(
     appeal_outcome?: string;
     appeal_bond?: string;
   };
-  const pos = allStakePositions().positions;
+  const pos = (await allStakePositions()).positions;
   const stakes = new Map<string, bigint>();
   for (const [key, row] of Object.entries(pos)) {
     const parsed = parsePosKey(key);
@@ -151,7 +151,7 @@ export async function creditRefundedStakers(
 
   const credited: PayoutTransfer[] = [];
   for (const [addr, stake] of stakes) {
-    if (payoutsFor(addr, claimId, claimOrigin).some((t) => t.kind === "refund")) continue;
+    if ((await payoutsFor(addr, claimId, claimOrigin)).some((t) => t.kind === "refund")) continue;
     credited.push(await creditOne({
       claimId,
       to: addr,
@@ -174,7 +174,7 @@ export async function creditRefundedStakers(
         const addr = addrs[i]!;
         const extraBond = share + (i === addrs.length - 1 ? remainder : 0n);
         if (extraBond <= 0n) continue;
-        const already = payoutsFor(addr, claimId, claimOrigin).filter((t) => t.kind === "refund");
+        const already = (await payoutsFor(addr, claimId, claimOrigin)).filter((t) => t.kind === "refund");
         if (already.length >= 2) continue;
         credited.push(await creditOne({
           claimId,
@@ -213,7 +213,7 @@ async function creditOne(opts: {
       credited: false,
       originContract: claimOrigin,
     };
-    recordPayout(row);
+    await recordPayout(row);
     return row;
   }
   const before = await readNativeBalance(to);
@@ -230,6 +230,6 @@ async function creditOne(opts: {
     credited: after > before,
     originContract: claimOrigin,
   };
-  recordPayout(row);
+  await recordPayout(row);
   return row;
 }

@@ -1,8 +1,7 @@
 import "server-only";
-import { mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
-import { dirname, join } from "path";
 import { isOnChainClaimId, type ClaimSummary } from "./claim-display";
 import { currentCourtAddress, originOf } from "../legacy-claim-ids";
+import { hashLoad, hashReplace, hashSet, metaGet, metaSet, parseField } from "../persist";
 
 /**
  * App-side source of truth for "what claims exist."
@@ -10,51 +9,7 @@ import { currentCourtAddress, originOf } from "../legacy-claim-ids";
  * Chain refresh is optional and only runs when studio-gate allows it.
  */
 
-type BookFile = {
-  refreshedAt: number;
-  claims: ClaimSummary[];
-};
-
-const FILE = join(process.cwd(), ".data", "claims-book.json");
 const FRESH_MS = 5 * 60 * 1000;
-
-let mem: BookFile | null = null;
-let memMtime = 0;
-
-function empty(): BookFile {
-  return { refreshedAt: 0, claims: [] };
-}
-
-function load(): BookFile {
-  try {
-    const mtime = statSync(FILE).mtimeMs;
-    if (mem && mtime === memMtime) return mem;
-    const parsed = JSON.parse(readFileSync(FILE, "utf8")) as BookFile;
-    mem = {
-      refreshedAt: typeof parsed.refreshedAt === "number" ? parsed.refreshedAt : 0,
-      claims: Array.isArray(parsed.claims)
-        ? parsed.claims.filter((c) => isOnChainClaimId(c.claim_id))
-        : [],
-    };
-    memMtime = mtime;
-    return mem;
-  } catch {
-    if (mem) return mem;
-    mem = empty();
-    return mem;
-  }
-}
-
-function persist() {
-  const data = load();
-  mkdirSync(dirname(FILE), { recursive: true });
-  writeFileSync(FILE, JSON.stringify(data, null, 2));
-  try {
-    memMtime = statSync(FILE).mtimeMs;
-  } catch {
-    /* ignore */
-  }
-}
 
 function withOrigin(claim: ClaimSummary): ClaimSummary {
   return {
@@ -68,12 +23,25 @@ function rowKey(claim: ClaimSummary): string {
   return `${(stamped.origin_contract || "").toLowerCase()}::${stamped.claim_id}`;
 }
 
-export function bookAll(): ClaimSummary[] {
-  return load().claims.map(withOrigin);
+async function loadClaims(): Promise<ClaimSummary[]> {
+  const fields = await hashLoad("claims");
+  const claims: ClaimSummary[] = [];
+  for (const raw of Object.values(fields)) {
+    const claim = parseField<ClaimSummary | null>(raw, null);
+    if (claim && isOnChainClaimId(claim.claim_id)) claims.push(withOrigin(claim));
+  }
+  return claims;
 }
 
-export function bookGet(id: string, opts?: { origin?: string | null; preferLegacy?: boolean }): ClaimSummary | null {
-  const rows = load().claims.map(withOrigin).filter((c) => c.claim_id === id);
+export async function bookAll(): Promise<ClaimSummary[]> {
+  return loadClaims();
+}
+
+export async function bookGet(
+  id: string,
+  opts?: { origin?: string | null; preferLegacy?: boolean }
+): Promise<ClaimSummary | null> {
+  const rows = (await loadClaims()).filter((c) => c.claim_id === id);
   if (rows.length === 0) return null;
   if (opts?.origin) {
     const match = rows.find((c) => (c.origin_contract || "").toLowerCase() === opts.origin!.toLowerCase());
@@ -87,27 +55,29 @@ export function bookGet(id: string, opts?: { origin?: string | null; preferLegac
   return live ?? rows[0];
 }
 
-export function bookUpsert(claim: ClaimSummary) {
+export async function bookUpsert(claim: ClaimSummary): Promise<void> {
   if (!isOnChainClaimId(claim.claim_id)) return;
-  const data = load();
   const next = withOrigin(claim);
-  const key = rowKey(next);
-  data.claims = [next, ...data.claims.filter((c) => rowKey(c) !== key)];
-  mem = data;
-  persist();
+  await hashSet("claims", rowKey(next), next);
 }
 
-export function bookReplace(claims: ClaimSummary[]) {
-  mem = { refreshedAt: Date.now(), claims: claims.map(withOrigin) };
-  persist();
+export async function bookReplace(claims: ClaimSummary[]): Promise<void> {
+  const fields: Record<string, ClaimSummary> = {};
+  for (const claim of claims) {
+    if (!isOnChainClaimId(claim.claim_id)) continue;
+    const next = withOrigin(claim);
+    fields[rowKey(next)] = next;
+  }
+  await hashReplace("claims", fields);
+  await metaSet(Date.now());
 }
 
-export function bookIsFresh(): boolean {
-  const data = load();
-  return data.refreshedAt > 0 && Date.now() - data.refreshedAt < FRESH_MS;
+export async function bookIsFresh(): Promise<boolean> {
+  const meta = await metaGet();
+  return meta.refreshedAt > 0 && Date.now() - meta.refreshedAt < FRESH_MS;
 }
 
-export function bookMeta() {
-  const data = load();
-  return { count: data.claims.length, refreshedAt: data.refreshedAt, fresh: bookIsFresh() };
+export async function bookMeta() {
+  const [claims, meta, fresh] = await Promise.all([loadClaims(), metaGet(), bookIsFresh()]);
+  return { count: claims.length, refreshedAt: meta.refreshedAt, fresh };
 }

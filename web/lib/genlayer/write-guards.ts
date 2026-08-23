@@ -13,7 +13,7 @@ export async function loadLiveClaim(id: string): Promise<ClaimSummary> {
     throw new Error("[EXPECTED] unknown claim_id");
   }
   const claim = (await readOneClaim(id.trim())) as ClaimSummary;
-  bookUpsert(claim);
+  await bookUpsert(claim);
   return claim;
 }
 

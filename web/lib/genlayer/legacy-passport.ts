@@ -4,9 +4,9 @@ import type { OnChainPassport } from "./passport";
 import { isLegacyClaim } from "../legacy-claim-ids";
 
 /** Claimant stats from the retired court, merged so Passport still shows real history. */
-export function legacyPassportFromBook(address: string): OnChainPassport {
+export async function legacyPassportFromBook(address: string): Promise<OnChainPassport> {
   const addr = address.toLowerCase();
-  const claims = bookAll().filter(
+  const claims = (await bookAll()).filter(
     (c) => isLegacyClaim(c) && c.poster && c.poster.toLowerCase() === addr
   );
   const history = claims.map((c) => c.claim_id);
@@ -34,8 +34,8 @@ export function legacyPassportFromBook(address: string): OnChainPassport {
   };
 }
 
-export function mergePassports(address: string, live: OnChainPassport | null): OnChainPassport {
-  const legacy = legacyPassportFromBook(address);
+export async function mergePassports(address: string, live: OnChainPassport | null): Promise<OnChainPassport> {
+  const legacy = await legacyPassportFromBook(address);
   if (!live) return legacy;
   const category_breakdown = { ...legacy.category_breakdown };
   for (const [type, stats] of Object.entries(live.category_breakdown || {})) {

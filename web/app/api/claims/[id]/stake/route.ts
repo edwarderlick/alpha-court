@@ -43,7 +43,7 @@ export async function POST(
       process.env.ALPHA_COURT_SIGNER_ADDRESS ||
       "";
     if (signer.startsWith("0x")) {
-      rememberStakePosition({
+      await rememberStakePosition({
         address: signer,
         claimId: id,
         side,

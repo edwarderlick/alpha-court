@@ -1,8 +1,1 @@
-{
-  "crons": [
-    {
-      "path": "/api/keeper/tick",
-      "schedule": "0 0 * * *"
-    }
-  ]
-}
+{}

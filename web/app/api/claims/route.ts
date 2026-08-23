@@ -22,7 +22,7 @@ export async function GET() {
     const claims = await getAllClaimsSafe();
     return NextResponse.json({ claims });
   } catch (err) {
-    const stale = bookAll();
+    const stale = await bookAll();
     if (stale.length > 0) return NextResponse.json({ claims: stale, cached: true });
     const { body, status } = apiErrorResponse(err);
     return NextResponse.json(body, { status });
@@ -34,7 +34,7 @@ async function createdPayload(txHash: string, receipt: unknown) {
   if (isOnChainClaimId(claimId)) {
     try {
       const claim = (await readOneClaim(claimId)) as ClaimSummary;
-      bookUpsert(claim);
+      await bookUpsert(claim);
     } catch {
       /* listing still works from the receipt id */
     }

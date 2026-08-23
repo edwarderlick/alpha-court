@@ -1,8 +1,7 @@
 import "server-only";
-import { mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
-import { dirname, join } from "path";
 import { readClaimRaw } from "./client";
 import { studioCanRead, studioNoteError } from "./studio-gate";
+import { hashLoad, hashSet, parseField } from "../persist";
 
 export type OnChainPassport = {
   address: string;
@@ -16,42 +15,16 @@ type CacheFile = {
   byAddress: Record<string, { at: number; passport: OnChainPassport }>;
 };
 
-const FILE = join(process.cwd(), ".data", "passports.json");
 const FRESH_MS = 10 * 60 * 1000;
 
-let mem: CacheFile | null = null;
-let memMtime = 0;
-
-function empty(): CacheFile {
-  return { byAddress: {} };
-}
-
-function load(): CacheFile {
-  try {
-    const mtime = statSync(FILE).mtimeMs;
-    if (mem && mtime === memMtime) return mem;
-    const parsed = JSON.parse(readFileSync(FILE, "utf8")) as CacheFile;
-    mem = {
-      byAddress:
-        parsed.byAddress && typeof parsed.byAddress === "object" ? parsed.byAddress : {},
-    };
-    memMtime = mtime;
-    return mem;
-  } catch {
-    mem = empty();
-    return mem;
+async function load(): Promise<CacheFile> {
+  const fields = await hashLoad("passports");
+  const byAddress: CacheFile["byAddress"] = {};
+  for (const [k, raw] of Object.entries(fields)) {
+    const row = parseField<CacheFile["byAddress"][string] | null>(raw, null);
+    if (row) byAddress[k] = row;
   }
-}
-
-function persist() {
-  const data = load();
-  mkdirSync(dirname(FILE), { recursive: true });
-  writeFileSync(FILE, JSON.stringify(data, null, 2));
-  try {
-    memMtime = statSync(FILE).mtimeMs;
-  } catch {
-    /* ignore */
-  }
+  return { byAddress };
 }
 
 function asPassport(raw: unknown, fallbackAddress: string): OnChainPassport | null {
@@ -73,7 +46,7 @@ export async function getPassportCached(address: string): Promise<OnChainPasspor
   const addr = address.trim();
   if (!addr.startsWith("0x") || addr.length < 10) return null;
   const key = addr.toLowerCase();
-  const data = load();
+  const data = await load();
   const cached = data.byAddress[key];
   const fresh = cached && Date.now() - cached.at < FRESH_MS;
   if (fresh) return cached.passport;
@@ -82,9 +55,9 @@ export async function getPassportCached(address: string): Promise<OnChainPasspor
     const raw = await readClaimRaw("get_passport", [addr]);
     const passport = asPassport(raw, addr);
     if (passport) {
-      data.byAddress[key] = { at: Date.now(), passport };
-      mem = data;
-      persist();
+      const row = { at: Date.now(), passport };
+      data.byAddress[key] = row;
+      await hashSet("passports", key, row);
     }
     return passport ?? cached?.passport ?? null;
   } catch (err) {

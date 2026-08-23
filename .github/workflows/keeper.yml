@@ -1,0 +1,37 @@
+name: Keeper tick
+
+# GitHub Actions is the production keeper. Vercel Hobby serverless
+# functions time out at 10s; Studio consensus writes take longer.
+# This job runs the same runKeeperTick() against the live contract
+# and the same Redis book the Next.js app uses.
+on:
+  schedule:
+    - cron: "* * * * *"
+  workflow_dispatch:
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Tick
+        env:
+          ALPHA_COURT_CONTRACT_ADDRESS: ${{ secrets.ALPHA_COURT_CONTRACT_ADDRESS }}
+          ALPHA_COURT_SIGNER_PRIVATE_KEY: ${{ secrets.ALPHA_COURT_SIGNER_PRIVATE_KEY }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+          KEEPER_ENABLED: "true"
+          KEEPER_MIN_CLAIM_ID: ${{ secrets.KEEPER_MIN_CLAIM_ID }}
+          SURF_API_KEY: ${{ secrets.SURF_API_KEY }}
+        run: npm run keeper

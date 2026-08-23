@@ -8,7 +8,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ won: false });
   }
   const origin = req.nextUrl.searchParams.get("origin") ?? "";
-  const hits = payoutsFor(address, claimId, origin || undefined).filter(
+  const hits = (await payoutsFor(address, claimId, origin || undefined)).filter(
     (t) => t.kind === "payout" && t.credited === true
   );
   return NextResponse.json({

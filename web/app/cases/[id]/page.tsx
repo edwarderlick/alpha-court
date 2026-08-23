@@ -113,7 +113,7 @@ export default async function CaseDetailPage({
   const { id } = await params;
   const { legacy, preview } = await searchParams;
   let claim: Claim;
-  const booked = findCachedClaim(id, { preferLegacy: legacy === "1" });
+  const booked = await findCachedClaim(id, { preferLegacy: legacy === "1" });
   const previewing =
     process.env.NODE_ENV !== "production" && preview === "APPEAL_PENDING";
 
@@ -169,13 +169,13 @@ export default async function CaseDetailPage({
   } else if (isOnChainClaimId(id)) {
     try {
       claim = (await readOneClaim(id)) as Claim;
-      rememberClaim(claim as unknown as ClaimSummary);
+      await rememberClaim(claim as unknown as ClaimSummary);
     } catch (err) {
       if (booked) {
         claim = booked as unknown as Claim;
       } else {
         const detail = err instanceof Error ? err.message : String(err);
-        const known = (getCachedClaims() ?? []).map((c) => Number(c.claim_id)).filter((n) => Number.isFinite(n));
+        const known = ((await getCachedClaims()) ?? []).map((c) => Number(c.claim_id)).filter((n) => Number.isFinite(n));
         const maxKnown = known.length ? Math.max(...known) : 0;
         const n = Number(id);
         const implausible = Number.isInteger(n) && n > maxKnown + 100;

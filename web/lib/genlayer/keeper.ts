@@ -31,11 +31,11 @@ let lastTick: KeeperTickResult | null = null;
 async function refreshBook(id: string, fallbackState: string) {
   try {
     const live = (await readClaimRaw("get_claim", [id], { bypass: true })) as ClaimSummary;
-    bookUpsert(live);
+    await bookUpsert(live);
     return live;
   } catch {
-    const existing = bookGet(id);
-    if (existing) bookUpsert({ ...existing, state: fallbackState });
+    const existing = await bookGet(id);
+    if (existing) await bookUpsert({ ...existing, state: fallbackState });
     return existing ? { ...existing, state: fallbackState } : { state: fallbackState };
   }
 }
@@ -61,7 +61,7 @@ function eligible(claim: KeeperClaim): boolean {
 
 async function loadClaims(): Promise<KeeperClaim[]> {
   const { bookAll } = await import("./book");
-  return bookAll().map((c) => ({
+  return (await bookAll()).map((c) => ({
     claim_id: c.claim_id,
     state: c.state,
     deadline: c.deadline,

@@ -1,6 +1,4 @@
 import "server-only";
-import { mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
-import { dirname, join } from "path";
 import { bookAll, bookGet } from "./book";
 import { readClaimRaw } from "./client";
 import { studioCanRead, studioNoteError } from "./studio-gate";
@@ -14,6 +12,7 @@ import {
 import { attoToGenString } from "./atto";
 import { mapPool } from "./pool";
 import { payoutAddressesForClaim, payoutsFor, type PayoutTransfer } from "./payouts";
+import { hashLoad, hashReplace, hashSet, parseField } from "../persist";
 
 export type StakeRow = {
   claim_id: string;
@@ -38,35 +37,20 @@ type PosCache = {
   positions: Record<string, { amountAtto: string; at: number; terminal: boolean }>;
 };
 
-const FILE = join(process.cwd(), ".data", "stake-positions.json");
 const OPEN_TTL_MS = 2 * 60 * 1000;
 
-let mem: PosCache | null = null;
-let memMtime = 0;
-
-function loadPos(): PosCache {
-  try {
-    const mtime = statSync(FILE).mtimeMs;
-    if (mem && mtime === memMtime) return mem;
-    const parsed = JSON.parse(readFileSync(FILE, "utf8")) as PosCache;
-    mem = { positions: parsed.positions && typeof parsed.positions === "object" ? parsed.positions : {} };
-    memMtime = mtime;
-    return mem;
-  } catch {
-    mem = { positions: {} };
-    return mem;
+async function loadPos(): Promise<PosCache> {
+  const fields = await hashLoad("stakes");
+  const positions: PosCache["positions"] = {};
+  for (const [key, raw] of Object.entries(fields)) {
+    const row = parseField<PosCache["positions"][string] | null>(raw, null);
+    if (row) positions[key] = row;
   }
+  return { positions };
 }
 
-function persistPos() {
-  const data = loadPos();
-  mkdirSync(dirname(FILE), { recursive: true });
-  writeFileSync(FILE, JSON.stringify(data, null, 2));
-  try {
-    memMtime = statSync(FILE).mtimeMs;
-  } catch {
-    /* ignore */
-  }
+async function persistPos(data: PosCache) {
+  await hashReplace("stakes", data.positions);
 }
 
 export function posKey(
@@ -96,8 +80,12 @@ export function parsePosKey(
   return { addr, origin: null, id, side };
 }
 
-function inferOrigin(claimId: string, observedAt: number | null | undefined): string {
-  const matches = bookAll().filter((c) => c.claim_id === claimId);
+function inferOrigin(
+  claims: ClaimSummary[],
+  claimId: string,
+  observedAt: number | null | undefined
+): string {
+  const matches = claims.filter((c) => c.claim_id === claimId);
   if (matches.length === 1) return originOf(matches[0]).toLowerCase();
   if (matches.length > 1) {
     const live = matches.find((c) => !isLegacyClaim(c));
@@ -115,7 +103,7 @@ function inferOrigin(claimId: string, observedAt: number | null | undefined): st
   }).toLowerCase();
 }
 
-function migratePos(cache: PosCache): boolean {
+function migratePos(cache: PosCache, claims: ClaimSummary[]): boolean {
   let changed = false;
   const next: PosCache["positions"] = {};
   for (const [key, row] of Object.entries(cache.positions)) {
@@ -124,7 +112,7 @@ function migratePos(cache: PosCache): boolean {
       next[key] = row;
       continue;
     }
-    const origin = parsed.origin || inferOrigin(parsed.id, row.at);
+    const origin = parsed.origin || inferOrigin(claims, parsed.id, row.at);
     const migrated = posKey(parsed.addr, parsed.id, parsed.side, origin);
     if (migrated !== key) changed = true;
     const prev = next[migrated];
@@ -137,13 +125,14 @@ function migratePos(cache: PosCache): boolean {
   return changed;
 }
 
-function positions(): PosCache {
-  const cache = loadPos();
-  if (migratePos(cache)) persistPos();
+async function positions(): Promise<PosCache> {
+  const cache = await loadPos();
+  const claims = await bookAll();
+  if (migratePos(cache, claims)) await persistPos(cache);
   return cache;
 }
 
-export function allStakePositions(): PosCache {
+export async function allStakePositions(): Promise<PosCache> {
   return positions();
 }
 
@@ -177,14 +166,14 @@ async function readStakeAtto(claimId: string, side: "for" | "against", address: 
   return toAttoString(raw);
 }
 
-function buildRow(
+async function buildRow(
   addr: string,
   claim: ClaimSummary,
   side: "for" | "against",
   amountAtto: string
-): StakeRow | null {
+): Promise<StakeRow | null> {
   if (!amountAtto || amountAtto === "0") return null;
-  const transfers = payoutsFor(addr, claim.claim_id, claim.origin_contract);
+  const transfers = await payoutsFor(addr, claim.claim_id, claim.origin_contract);
   const winner = winningSide(claim.consensus_result);
   let outcome: StakeRow["outcome"] = "pending";
   if (claim.state === "REFUNDED") outcome = "refunded";
@@ -219,20 +208,21 @@ function buildRow(
 }
 
 /** Same won/lost/payout rules as stakesForAddress, from the position cache + book. No RPC. */
-export function stakeRowsFromCache(address: string): StakeRow[] {
+export async function stakeRowsFromCache(address: string): Promise<StakeRow[]> {
   const addr = address.toLowerCase();
   if (!addr.startsWith("0x") || addr.length < 10) return [];
-  const cache = positions();
-  const claims = new Map(bookAll().map((c) => [claimRowKey(c), c]));
+  const cache = await positions();
+  const all = await bookAll();
+  const claims = new Map(all.map((c) => [claimRowKey(c), c]));
   const rows: StakeRow[] = [];
   for (const [key, pos] of Object.entries(cache.positions)) {
     const parsed = parsePosKey(key);
     if (!parsed || parsed.addr !== addr || pos.amountAtto === "0") continue;
     if (parsed.side !== "for" && parsed.side !== "against") continue;
-    const origin = parsed.origin || inferOrigin(parsed.id, pos.at);
-    const claim = claims.get(`${origin}::${parsed.id}`) ?? bookGet(parsed.id, { origin });
+    const origin = parsed.origin || inferOrigin(all, parsed.id, pos.at);
+    const claim = claims.get(`${origin}::${parsed.id}`) ?? (await bookGet(parsed.id, { origin }));
     if (!claim) continue;
-    const row = buildRow(addr, claim, parsed.side, pos.amountAtto);
+    const row = await buildRow(addr, claim, parsed.side, pos.amountAtto);
     if (row) rows.push(row);
   }
   rows.sort((a, b) => {
@@ -247,12 +237,12 @@ export async function stakesForAddress(address: string): Promise<StakeRow[]> {
   const addr = address.toLowerCase();
   if (!addr.startsWith("0x") || addr.length < 10) return [];
 
-  const claims = bookAll()
+  const claims = (await bookAll())
     .filter((c) => isOnChainClaimId(c.claim_id))
     .filter((c) => (parseFloat(c.stake_for_total) || 0) + (parseFloat(c.stake_against_total) || 0) > 0)
     .slice(0, 24);
 
-  const cache = positions();
+  const cache = await positions();
   const now = Date.now();
   const canRead = studioCanRead();
   const rows: StakeRow[] = [];
@@ -279,12 +269,12 @@ export async function stakesForAddress(address: string): Promise<StakeRow[]> {
       } else {
         amountAtto = cached?.amountAtto ?? null;
       }
-      const row = amountAtto ? buildRow(addr, claim, side, amountAtto) : null;
+      const row = amountAtto ? await buildRow(addr, claim, side, amountAtto) : null;
       if (row) rows.push(row);
     }
   });
 
-  persistPos();
+  await persistPos(cache);
   rows.sort((a, b) => Number(b.claim_id) - Number(a.claim_id));
   return rows;
 }
@@ -297,18 +287,19 @@ export type StakeRecord = {
 };
 
 /** Same won/lost rules as stakesForAddress, from the position cache + book. No extra RPC. */
-export function stakeRecordFromCache(address: string): StakeRecord {
+export async function stakeRecordFromCache(address: string): Promise<StakeRecord> {
   const addr = address.toLowerCase();
-  const cache = positions();
-  const claims = new Map(bookAll().map((c) => [claimRowKey(c), c]));
+  const cache = await positions();
+  const all = await bookAll();
+  const claims = new Map(all.map((c) => [claimRowKey(c), c]));
   let wins = 0;
   let losses = 0;
   let pending = 0;
   for (const [key, pos] of Object.entries(cache.positions)) {
     const parsed = parsePosKey(key);
     if (!parsed || parsed.addr !== addr || pos.amountAtto === "0") continue;
-    const origin = parsed.origin || inferOrigin(parsed.id, pos.at);
-    const claim = claims.get(`${origin}::${parsed.id}`) ?? bookGet(parsed.id, { origin });
+    const origin = parsed.origin || inferOrigin(all, parsed.id, pos.at);
+    const claim = claims.get(`${origin}::${parsed.id}`) ?? (await bookGet(parsed.id, { origin }));
     if (!claim) continue;
     const side = parsed.side;
     if (claim.state === "REFUNDED") continue;
@@ -329,7 +320,7 @@ export function stakeRecordFromCache(address: string): StakeRecord {
   };
 }
 
-export function rememberStakePosition(opts: {
+export async function rememberStakePosition(opts: {
   address: string;
   claimId: string;
   side: "for" | "against";
@@ -338,20 +329,21 @@ export function rememberStakePosition(opts: {
   stakedAt?: number;
   originContract?: string | null;
 }) {
-  const cache = positions();
   const origin = opts.originContract || currentCourtAddress();
   const key = posKey(opts.address, opts.claimId, opts.side, origin);
+  const cache = await positions();
   const prev = cache.positions[key];
   const nextAtto =
     prev && prev.amountAtto !== "0"
       ? (BigInt(prev.amountAtto) + BigInt(opts.amountAtto || "0")).toString()
       : opts.amountAtto;
-  cache.positions[key] = {
+  const row = {
     amountAtto: nextAtto,
     at: opts.stakedAt ?? Date.now(),
     terminal: opts.terminal ?? false,
   };
-  persistPos();
+  cache.positions[key] = row;
+  await hashSet("stakes", key, row);
 }
 
 export type ClaimStaker = {
@@ -374,17 +366,18 @@ export async function stakersForClaim(
   stakers: ClaimStaker[];
   winningSide: "for" | "against" | null;
 }> {
-  const claim = bookGet(claimId, { preferLegacy: opts?.preferLegacy }) ?? null;
+  const claim = (await bookGet(claimId, { preferLegacy: opts?.preferLegacy })) ?? null;
   const winner = claim ? winningSide(claim.consensus_result) : null;
   const claimOrigin = claim ? originOf(claim).toLowerCase() : currentCourtAddress();
   const candidates = new Set<string>();
   if (claim?.poster) candidates.add(claim.poster.toLowerCase());
-  for (const addr of payoutAddressesForClaim(claimId)) candidates.add(addr);
-  const cache = positions();
+  for (const addr of await payoutAddressesForClaim(claimId)) candidates.add(addr);
+  const cache = await positions();
+  const allClaims = await bookAll();
   for (const [key, row] of Object.entries(cache.positions)) {
     const parsed = parsePosKey(key);
     if (!parsed || parsed.id !== claimId || row.amountAtto === "0") continue;
-    const origin = parsed.origin || inferOrigin(parsed.id, row.at);
+    const origin = parsed.origin || inferOrigin(allClaims, parsed.id, row.at);
     if (origin !== claimOrigin) continue;
     candidates.add(parsed.addr);
   }
@@ -395,7 +388,7 @@ export async function stakersForClaim(
   const hasCache = Object.keys(cache.positions).some((key) => {
     const parsed = parsePosKey(key);
     if (!parsed || parsed.id !== claimId || cache.positions[key].amountAtto === "0") return false;
-    const origin = parsed.origin || inferOrigin(parsed.id, cache.positions[key].at);
+    const origin = parsed.origin || inferOrigin(allClaims, parsed.id, cache.positions[key].at);
     return origin === claimOrigin;
   });
   const skipLive = hasCache || isLegacyClaim(claim) || !canRead;
@@ -423,7 +416,7 @@ export async function stakersForClaim(
         amountAtto = cached?.amountAtto ?? null;
       }
       if (!amountAtto || amountAtto === "0") continue;
-      const rec = stakeRecordFromCache(addr);
+      const rec = await stakeRecordFromCache(addr);
       const observed = cache.positions[key]?.at ?? null;
       const fromCreate =
         claim && side === "for" && claim.poster && claim.poster.toLowerCase() === addr
@@ -445,7 +438,7 @@ export async function stakersForClaim(
     }
   });
 
-  persistPos();
+  await persistPos(cache);
   stakers.sort((a, b) => Number(BigInt(b.amountAtto) - BigInt(a.amountAtto)));
   return { stakers, winningSide: winner };
 }

@@ -12,7 +12,7 @@ export async function POST(req: NextRequest) {
     if (!isOnChainClaimId(claim.claim_id)) {
       return NextResponse.json({ error: "[EXPECTED] unknown claim_id" }, { status: 400 });
     }
-    rememberClaim(claim);
+    await rememberClaim(claim);
     return NextResponse.json({ ok: true });
   } catch {
     return NextResponse.json({ error: "bad body" }, { status: 400 });

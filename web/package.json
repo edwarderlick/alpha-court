@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "tsx --test lib/genlayer/keeper-cycle.test.ts",
+    "test": "tsx --test lib/genlayer/keeper-cycle.test.ts lib/genlayer/payout-credit-rules.test.ts",
     "keeper": "node --import tsx --conditions=react-server scripts/run-keeper-tick.ts",
     "seed-persist": "node --import tsx --conditions=react-server scripts/seed-persist.ts"
   },

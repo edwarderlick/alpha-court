@@ -24,6 +24,7 @@ export type KeeperTickResult = {
   expired: string[];
   appealed: string[];
   refunded: string[];
+  recredited: string[];
   skipped: string[];
   errors: { claimId: string; action: string; message: string }[];
 };
@@ -57,6 +58,7 @@ export function emptyKeeperTickResult(at = new Date().toISOString()): KeeperTick
     expired: [],
     appealed: [],
     refunded: [],
+    recredited: [],
     skipped: [],
     errors: [],
   };
@@ -100,6 +102,7 @@ export async function runKeeperCycle(
   const maxExpires = 1;
   const maxAppeals = 1;
   const maxRefunds = 1;
+  const maxRecredits = 1;
 
   for (const claim of claims) {
     if (result.locked.length >= maxLocks) break;
@@ -268,6 +271,38 @@ export async function runKeeperCycle(
         claimId: claim.claim_id,
         action: "appeal",
         message,
+      });
+    }
+  }
+
+  // Drain RESOLVED claims whose winners never actually got credited --
+  // creditWinners is otherwise only invoked once, synchronously, right
+  // after the resolve_verdict/resolve_appeal write that produced this
+  // state. A transient failure there (a CANCELED native send, a Studio
+  // rate limit, an uncaught error) previously stranded that claim's
+  // winners forever, since nothing ever retried it -- see the #16/#18/
+  // #19/#21 incident. Symmetric to the REFUNDED drain below.
+  for (const claim of claims) {
+    if (result.recredited.length >= maxRecredits) break;
+    if (claim.state !== "RESOLVED") continue;
+    if (result.resolved.includes(claim.claim_id) || result.appealed.includes(claim.claim_id)) {
+      continue;
+    }
+    try {
+      console.log(`[keeper] creditWinners retry #${claim.claim_id}`);
+      const credited = await io.creditWinners(claim.claim_id, "");
+      if (credited.length > 0) {
+        console.log(
+          `[keeper] native payout (retry) #${claim.claim_id}`,
+          credited.map((c) => `${c.to}:${c.value}`).join(","),
+        );
+        result.recredited.push(claim.claim_id);
+      }
+    } catch (err) {
+      result.errors.push({
+        claimId: claim.claim_id,
+        action: "payout",
+        message: errorMessage(err),
       });
     }
   }

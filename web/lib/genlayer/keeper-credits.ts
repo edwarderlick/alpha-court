@@ -8,6 +8,7 @@ import { payoutsFor, recordPayout, type PayoutTransfer } from "./payouts";
 import { currentCourtAddress, originOf } from "../legacy-claim-ids";
 import { allStakePositions, parsePosKey } from "./stakes";
 import { acquireLock, releaseLock } from "../persist";
+import { alreadyCredited, creditedCount } from "./payout-credit-rules";
 
 const CREDIT_LOCK_TTL_MS = 3 * 60 * 1000;
 
@@ -38,6 +39,7 @@ function sameOrigin(posOrigin: string | null, claimOrigin: string): boolean {
   if (!posOrigin) return true;
   return posOrigin.toLowerCase() === claimOrigin.toLowerCase();
 }
+
 
 /**
  * After resolve_verdict succeeds on Studionet, credit winners with a
@@ -92,7 +94,7 @@ async function creditResolvedWinnersLocked(
   for (let i = 0; i < addrs.length; i++) {
     const addr = addrs[i]!;
     const stake = winners.get(addr)!;
-    const already = (await payoutsFor(addr, claimId, claimOrigin)).some((t) => t.kind === "payout");
+    const already = alreadyCredited(await payoutsFor(addr, claimId, claimOrigin), "payout");
     if (already) {
       const share = (stake * losePool) / winPool;
       losingLeft -= share;
@@ -121,7 +123,7 @@ async function creditResolvedWinnersLocked(
   if (extra.appeal_outcome === "SETTLED" && extra.appeal_filer && extra.appeal_bond) {
     const bond = genStringToAtto(extra.appeal_bond);
     const filer = extra.appeal_filer.toLowerCase();
-    if (bond > 0n && !(await payoutsFor(filer, claimId, claimOrigin)).some((t) => t.kind === "refund" && t.to === filer)) {
+    if (bond > 0n && !alreadyCredited(await payoutsFor(filer, claimId, claimOrigin), "refund", filer)) {
       credited.push(await creditOne({
         claimId,
         to: filer,
@@ -180,7 +182,7 @@ async function creditRefundedStakersLocked(
 
   const credited: PayoutTransfer[] = [];
   for (const [addr, stake] of stakes) {
-    if ((await payoutsFor(addr, claimId, claimOrigin)).some((t) => t.kind === "refund")) continue;
+    if (alreadyCredited(await payoutsFor(addr, claimId, claimOrigin), "refund")) continue;
     credited.push(await creditOne({
       claimId,
       to: addr,
@@ -203,8 +205,8 @@ async function creditRefundedStakersLocked(
         const addr = addrs[i]!;
         const extraBond = share + (i === addrs.length - 1 ? remainder : 0n);
         if (extraBond <= 0n) continue;
-        const already = (await payoutsFor(addr, claimId, claimOrigin)).filter((t) => t.kind === "refund");
-        if (already.length >= 2) continue;
+        const doneCount = creditedCount(await payoutsFor(addr, claimId, claimOrigin), "refund");
+        if (doneCount >= 2) continue;
         credited.push(await creditOne({
           claimId,
           to: addr,

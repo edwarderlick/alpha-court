@@ -4,10 +4,35 @@ name: Keeper tick
 # functions time out at 10s; Studio consensus writes take longer.
 # This job runs the same runKeeperTick() against the live contract
 # and the same Redis book the Next.js app uses.
+#
+# GitHub's own `schedule:` trigger does NOT reliably fire at high
+# frequency: measured in production, a "* * * * *" (every-minute) cron
+# here fired its first scheduled run 47 minutes after the workflow went
+# live, then zero further scheduled runs for the next 19+ minutes -- see
+# repo Actions run history, event=schedule, for the raw timestamps. That
+# is GitHub throttling/dropping the schedule event under normal load, not
+# a bug in this workflow, and it leaves claims stuck far longer than the
+# "minutes" the product needs.
+#
+# Fix: don't depend on `schedule:` for cadence. The job itself loops,
+# ticking every ~15s for most of its time budget, then re-dispatches a
+# fresh run of itself via `workflow_dispatch` before it exits -- a
+# self-relaying chain that keeps ticking continuously regardless of
+# whether GitHub's scheduler cooperates. `schedule:` stays only as a
+# safety net to restart the chain if a run ever fails before re-dispatching.
+# Repo is public, so GitHub Actions minutes are unlimited -- a
+# near-continuous runner has no billing impact here.
 on:
   schedule:
-    - cron: "* * * * *"
+    - cron: "*/10 * * * *"
   workflow_dispatch:
+
+permissions:
+  actions: write
+
+concurrency:
+  group: keeper-relay
+  cancel-in-progress: false
 
 jobs:
   tick:
@@ -25,7 +50,7 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - name: Install
         run: npm ci
-      - name: Tick
+      - name: Tick loop
         env:
           ALPHA_COURT_CONTRACT_ADDRESS: ${{ secrets.ALPHA_COURT_CONTRACT_ADDRESS }}
           ALPHA_COURT_SIGNER_PRIVATE_KEY: ${{ secrets.ALPHA_COURT_SIGNER_PRIVATE_KEY }}
@@ -34,4 +59,14 @@ jobs:
           KEEPER_ENABLED: "true"
           KEEPER_MIN_CLAIM_ID: ${{ secrets.KEEPER_MIN_CLAIM_ID }}
           SURF_API_KEY: ${{ secrets.SURF_API_KEY }}
-        run: npm run keeper
+        run: |
+          end=$((SECONDS + 12*60))
+          while [ "$SECONDS" -lt "$end" ]; do
+            npm run keeper || true
+            sleep 15
+          done
+      - name: Re-dispatch to keep the relay going
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run keeper.yml --ref "${{ github.ref_name }}"

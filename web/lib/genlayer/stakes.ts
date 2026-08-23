@@ -12,7 +12,7 @@ import {
 import { attoToGenString } from "./atto";
 import { mapPool } from "./pool";
 import { payoutAddressesForClaim, payoutsFor, type PayoutTransfer } from "./payouts";
-import { hashLoad, hashReplace, hashSet, parseField } from "../persist";
+import { hashDelete, hashLoad, hashSet, parseField } from "../persist";
 
 export type StakeRow = {
   claim_id: string;
@@ -49,8 +49,28 @@ async function loadPos(): Promise<PosCache> {
   return { positions };
 }
 
-async function persistPos(data: PosCache) {
-  await hashReplace("stakes", data.positions);
+/**
+ * Persist only the fields this call actually learned/changed, as individual
+ * HSET/HDEL ops — never a blind whole-hash replace. A full DEL+HSET based on
+ * a snapshot taken at load time would clobber any stake written by a
+ * concurrent request in between (e.g. a third staker's `rememberStakePosition`
+ * landing while this call's stale snapshot is being written back), silently
+ * dropping that staker from `ac:stakes`.
+ */
+async function persistDirty(dirty: Record<string, PosCache["positions"][string]>) {
+  await Promise.all(Object.entries(dirty).map(([key, row]) => hashSet("stakes", key, row)));
+}
+
+async function syncMigration(
+  before: PosCache["positions"],
+  after: PosCache["positions"]
+) {
+  const beforeKeys = Object.keys(before);
+  const afterKeys = new Set(Object.keys(after));
+  await Promise.all([
+    ...beforeKeys.filter((k) => !afterKeys.has(k)).map((k) => hashDelete("stakes", k)),
+    ...Object.entries(after).map(([k, row]) => hashSet("stakes", k, row)),
+  ]);
 }
 
 export function posKey(
@@ -128,7 +148,8 @@ function migratePos(cache: PosCache, claims: ClaimSummary[]): boolean {
 async function positions(): Promise<PosCache> {
   const cache = await loadPos();
   const claims = await bookAll();
-  if (migratePos(cache, claims)) await persistPos(cache);
+  const before = { ...cache.positions };
+  if (migratePos(cache, claims)) await syncMigration(before, cache.positions);
   return cache;
 }
 
@@ -246,6 +267,7 @@ export async function stakesForAddress(address: string): Promise<StakeRow[]> {
   const now = Date.now();
   const canRead = studioCanRead();
   const rows: StakeRow[] = [];
+  const dirty: Record<string, PosCache["positions"][string]> = {};
 
   await mapPool(claims, 2, async (claim) => {
     for (const side of ["for", "against"] as const) {
@@ -257,11 +279,13 @@ export async function stakesForAddress(address: string): Promise<StakeRow[]> {
       else if (canRead) {
         try {
           amountAtto = await readStakeAtto(claim.claim_id, side, addr);
-          cache.positions[key] = {
+          const row = {
             amountAtto,
             at: now,
             terminal: isTerminal(claim.state),
           };
+          cache.positions[key] = row;
+          dirty[key] = row;
         } catch (err) {
           studioNoteError(err, "read");
           amountAtto = cached?.amountAtto ?? null;
@@ -274,7 +298,7 @@ export async function stakesForAddress(address: string): Promise<StakeRow[]> {
     }
   });
 
-  await persistPos(cache);
+  await persistDirty(dirty);
   rows.sort((a, b) => Number(b.claim_id) - Number(a.claim_id));
   return rows;
 }
@@ -385,6 +409,7 @@ export async function stakersForClaim(
   const canRead = studioCanRead();
   const now = Date.now();
   const stakers: ClaimStaker[] = [];
+  const dirty: Record<string, PosCache["positions"][string]> = {};
   const hasCache = Object.keys(cache.positions).some((key) => {
     const parsed = parsePosKey(key);
     if (!parsed || parsed.id !== claimId || cache.positions[key].amountAtto === "0") return false;
@@ -403,11 +428,13 @@ export async function stakersForClaim(
       else if (!skipLive && canRead) {
         try {
           amountAtto = await readStakeAtto(claimId, side, addr);
-          cache.positions[key] = {
+          const row = {
             amountAtto,
             at: cached?.at ?? now,
             terminal: claim ? isTerminal(claim.state) : false,
           };
+          cache.positions[key] = row;
+          dirty[key] = row;
         } catch (err) {
           studioNoteError(err, "read");
           amountAtto = cached?.amountAtto ?? null;
@@ -438,7 +465,7 @@ export async function stakersForClaim(
     }
   });
 
-  await persistPos(cache);
+  await persistDirty(dirty);
   stakers.sort((a, b) => Number(BigInt(b.amountAtto) - BigInt(a.amountAtto)));
   return { stakers, winningSide: winner };
 }

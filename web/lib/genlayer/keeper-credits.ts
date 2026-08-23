@@ -7,6 +7,9 @@ import { attoToGenString } from "./atto";
 import { payoutsFor, recordPayout, type PayoutTransfer } from "./payouts";
 import { currentCourtAddress, originOf } from "../legacy-claim-ids";
 import { allStakePositions, parsePosKey } from "./stakes";
+import { acquireLock, releaseLock } from "../persist";
+
+const CREDIT_LOCK_TTL_MS = 3 * 60 * 1000;
 
 function winningSide(consensus: string): "for" | "against" | null {
   if (consensus === "HELD") return "for";
@@ -45,6 +48,19 @@ function sameOrigin(posOrigin: string | null, claimOrigin: string): boolean {
  * Any other send is credited:true only if getBalance actually increased.
  */
 export async function creditResolvedWinners(
+  claimId: string,
+  parentTx: string
+): Promise<PayoutTransfer[]> {
+  const lockName = `credit:${claimId}`;
+  if (!(await acquireLock(lockName, CREDIT_LOCK_TTL_MS))) return [];
+  try {
+    return await creditResolvedWinnersLocked(claimId, parentTx);
+  } finally {
+    await releaseLock(lockName);
+  }
+}
+
+async function creditResolvedWinnersLocked(
   claimId: string,
   parentTx: string
 ): Promise<PayoutTransfer[]> {
@@ -126,6 +142,19 @@ export async function creditResolvedWinners(
  * forfeited bond). Same Studionet native-send path as winners.
  */
 export async function creditRefundedStakers(
+  claimId: string,
+  parentTx: string
+): Promise<PayoutTransfer[]> {
+  const lockName = `credit:${claimId}`;
+  if (!(await acquireLock(lockName, CREDIT_LOCK_TTL_MS))) return [];
+  try {
+    return await creditRefundedStakersLocked(claimId, parentTx);
+  } finally {
+    await releaseLock(lockName);
+  }
+}
+
+async function creditRefundedStakersLocked(
   claimId: string,
   parentTx: string
 ): Promise<PayoutTransfer[]> {

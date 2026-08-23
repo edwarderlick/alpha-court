@@ -68,6 +68,7 @@ export function storageKind(): StorageKind {
 type Mem = {
   hashes: Record<HashName, Record<string, string>>;
   meta: { refreshedAt: number };
+  locks: Map<string, number>;
 };
 
 const g = globalThis as unknown as { __acPersist?: Mem };
@@ -77,9 +78,45 @@ function mem(): Mem {
     g.__acPersist = {
       hashes: { claims: {}, payouts: {}, stakes: {}, passports: {} },
       meta: { refreshedAt: 0 },
+      locks: new Map(),
     };
   }
   return g.__acPersist;
+}
+
+/**
+ * Distributed lock so two genuinely concurrent processes (e.g. the GitHub
+ * Actions keeper relay racing a manually-triggered emergency /api/keeper/*
+ * call) can't both pass a check-then-act idempotency check at once -- see
+ * creditResolvedWinners/creditRefundedStakers, which check "already paid?"
+ * before sending, then record the payout row only after the send. Redis
+ * `SET NX PX` is atomic server-side. The disk/mem fallback is a plain
+ * in-process Map, which is safe because Node is single-threaded and this
+ * backend is only ever used by one process (local dev, no Redis configured).
+ */
+export async function acquireLock(name: string, ttlMs: number): Promise<boolean> {
+  const key = `ac:lock:${name}`;
+  const r = getRedis();
+  if (r) {
+    const ok = await r.set(key, "1", { nx: true, px: ttlMs });
+    return ok === "OK";
+  }
+  const locks = mem().locks;
+  const now = Date.now();
+  const expiresAt = locks.get(key);
+  if (expiresAt != null && expiresAt > now) return false;
+  locks.set(key, now + ttlMs);
+  return true;
+}
+
+export async function releaseLock(name: string): Promise<void> {
+  const key = `ac:lock:${name}`;
+  const r = getRedis();
+  if (r) {
+    await r.del(key);
+    return;
+  }
+  mem().locks.delete(key);
 }
 
 function dataDir() {
@@ -207,6 +244,18 @@ export async function hashSet(name: HashName, field: string, value: unknown): Pr
   }
   const fields = await hashLoad(name);
   fields[field] = encoded;
+  mem().hashes[name] = fields;
+  if (storageKind() === "disk") toDisk(name, fields, mem().meta.refreshedAt);
+}
+
+export async function hashDelete(name: HashName, field: string): Promise<void> {
+  const r = getRedis();
+  if (r) {
+    await r.hdel(REDIS_HASH[name], field);
+    return;
+  }
+  const fields = await hashLoad(name);
+  delete fields[field];
   mem().hashes[name] = fields;
   if (storageKind() === "disk") toDisk(name, fields, mem().meta.refreshedAt);
 }

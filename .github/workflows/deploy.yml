@@ -24,6 +24,30 @@ jobs:
       - name: Pull Vercel environment
         run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
       - name: Build
+        # Vercel's own Production env vars (dashboard-stored) came back
+        # empty for every key -- confirmed via `vercel env pull`, not
+        # assumed. Rather than depend on that store, inject the same
+        # values the keeper workflow already uses as real GitHub secrets,
+        # plus documented-safe literals from .env.example for the flags
+        # that aren't secret at all (network name, demo-signing default).
+        # `next build`'s dotenv loader never overrides a var already
+        # present in process.env, so these win over whatever `vercel pull`
+        # wrote (even if that's an empty string) into .env.production.local.
+        env:
+          ALPHA_COURT_CONTRACT_ADDRESS: ${{ secrets.ALPHA_COURT_CONTRACT_ADDRESS }}
+          NEXT_PUBLIC_ALPHA_COURT_CONTRACT_ADDRESS: ${{ secrets.ALPHA_COURT_CONTRACT_ADDRESS }}
+          NEXT_PUBLIC_GENLAYER_NETWORK: studionet
+          ALPHA_COURT_SIGNER_PRIVATE_KEY: ${{ secrets.ALPHA_COURT_SIGNER_PRIVATE_KEY }}
+          ALLOW_DEMO_SIGNING: "false"
+          NEXT_PUBLIC_ALLOW_DEMO_SIGNING: "false"
+          KEEPER_ENABLED: "true"
+          NEXT_PUBLIC_KEEPER_ENABLED: "true"
+          KEEPER_MIN_CLAIM_ID: ${{ secrets.KEEPER_MIN_CLAIM_ID }}
+          KEEPER_SECRET: ${{ secrets.KEEPER_SECRET }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          SURF_API_KEY: ${{ secrets.SURF_API_KEY }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
         run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
       - name: Deploy
         run: vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }}

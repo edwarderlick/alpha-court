@@ -1,8 +1,8 @@
 # Submission notes
 
-For the steward. Product facts only. Live court on GenLayer studionet (chain `61999`): **`0x22Cf7A9eA315e6EcE6C2BCBF60F0f656C39CCEE4`**. Two retired courts, both read-only legacy dockets: `0xd3cD69C30A4e899bA2D346723bffac066543cF97` (pre-payout-fix) and `0x8b2fF616d26Cb9bE48f4484BD5F8E7Cdaeca7902` (pre-deterministic-outcome-cross-check — see §1 and §3).
+For the steward. Product facts only. Live court on GenLayer studionet (chain `61999`): **`0xF9Df5e7b7E2119FC8186f7f21Dd37E075a4aCe85`**. Three retired courts, all read-only legacy dockets: `0xd3cD69C30A4e899bA2D346723bffac066543cF97` (pre-payout-fix), `0x8b2fF616d26Cb9bE48f4484BD5F8E7Cdaeca7902` (pre-deterministic-outcome-cross-check), and `0x22Cf7A9eA315e6EcE6C2BCBF60F0f656C39CCEE4` (pre-payout-authority/deadline-enforcement fix — see §4).
 
-**Source/bytecode match, verified explicitly:** the live address above was deployed from the exact `alpha_court.py` committed alongside this document — `_naive_outcome` and the deterministic cross-check described in §1 are live in its real bytecode, confirmed by a real resolve on this exact deployment (§3), not assumed from the source file alone. `0x8b2fF616…` was retired specifically because its deployed bytecode predated that fix and could not be patched in place (contracts aren't upgradeable) — this document never describes a safeguard on an address whose real bytecode doesn't have it.
+**Source/bytecode match, verified explicitly, every time:** the live address above was deployed from the exact `alpha_court.py` committed alongside this document — every safeguard described here (§1's deterministic cross-check, §4's on-chain payout enumeration and deadline checks) is live in its real bytecode, confirmed by a real end-to-end cycle on this exact deployment, not assumed from the source file alone. Each retired address above was retired specifically because its deployed bytecode predated the fix that superseded it and could not be patched in place (contracts aren't upgradeable) — this document never describes a safeguard on an address whose real bytecode doesn't have it.
 
 ## Prior-art check
 
@@ -74,23 +74,26 @@ Sybil Court hit the same wall on `withdraw()`. This is a platform limit, not an 
 
 | | |
 |---|---|
-| Live court | `0x22Cf7A9eA315e6EcE6C2BCBF60F0f656C39CCEE4` |
-| Retired courts | `0xd3cD69C30A4e899bA2D346723bffac066543cF97`, `0x8b2fF616d26Cb9bE48f4484BD5F8E7Cdaeca7902` |
+| Live court | `0xF9Df5e7b7E2119FC8186f7f21Dd37E075a4aCe85` |
+| Retired courts | `0xd3cD69C30A4e899bA2D346723bffac066543cF97`, `0x8b2fF616d26Cb9bE48f4484BD5F8E7Cdaeca7902`, `0x22Cf7A9eA315e6EcE6C2BCBF60F0f656C39CCEE4` |
 | Network | studionet, chain `61999` |
-| Direct tests | **83 passed, 0 failed** (`pytest test/direct/`) |
-| Deploy tx (live court) | `0x7abf6fd0191db9b8d7ac47f5e91572d4b7f2caacd395abc32d115c8e123c77c0` |
+| Direct tests | **90 passed, 0 failed** (`pytest test/direct/`) |
+| Deploy tx (live court) | `0x3ffca220cbb54f350e1878fc128b6d2320e0b39a7f75f583e7ba810763957d32` |
 
-**Full lifecycle on the live court, run end-to-end after deploy** (real txs, real ~90-second real-time wait for the deadline to actually elapse, real leader + validator consensus — not a direct-mode mock):
+**Two full lifecycles on the live court, run end-to-end after deploy** (real txs, real ~90-second real-time wait for the deadline to actually elapse, real leader + validator consensus — not a direct-mode mock):
 
 | Step | Claim | Tx |
 |---|---|---|
-| Create Price Threshold (`ETH/USD above 100`) | #1 | `0x0cc377b11322d88d24fd431e32f3ba5559bc8cee6bc7ef458bf9af5fcacd9d3f` |
-| Stake FOR (wallet B, 2 GEN) | #1 | `0x3e69c76df4d4388b588530230e69ada9de8d12fd6cc939225c3ea78f3858fd7f` |
-| Stake AGAINST (wallet C, 1 GEN) | #1 | `0x44f5b734b0c4276e939e83d92e0e390dc07b4d7b8d2b2df1260078d54df647f2` |
-| `lock_deadline_evidence` (real deadline elapsed) | #1 | `0x3791307af98034669d4d78cd6cefee16bcf04c8e8f6e4187e8dade5cd3c2ebf0` |
-| `resolve_verdict` → **RESOLVED, HELD** | #1 | `0xe5574313f6d4cc19e25ae0cebe82b30212736788a08234e6f098f4fc724b8ecd` |
+| Create Price Threshold (`ETH/USD above 100`) | #1 | `0xefd931a319dd1b04e51bc8ac10f8a932471064e167a1b33861783bd3ac7db12b` |
+| Stake FOR (wallet B, 2 GEN) | #1 | `0x32a74c25ec1743f1935ad3c0272bb295b47352d0703d8fe46972100bf3fd9893` |
+| Stake AGAINST (wallet C, 1 GEN) | #1 | `0x2c5e7d754758de5f2f157d87d18a1131fe60fa72d04601a3d2e336c31818053f` |
+| `lock_deadline_evidence` (real deadline elapsed) | #1 | `0xfa2606afd0af98289525fb5c6d512190d30f7c974ac9a42d4370ed308cfa6809` |
+| `resolve_verdict` → **RESOLVED, HELD** | #1 | `0x3694d8d99f450ed57bf77bc7418bb93384e8fb49b0a007e69c6ba30b38c03c73` |
+| Create Price Threshold, second claim (sole staker, used for §4's cache-deletion proof) | #2 | `0x2994df2f365b9546180f7e3b3bd98d3cda1975821501b88416a30bc9a89712ec` |
+| Stake FOR (wallet C, 3 GEN) | #2 | `0x65e64e2acde213ec43dcb867026a08fb611321166643d2e5c3f097a4fc24f3e0` |
+| `resolve_verdict` → **RESOLVED, HELD** | #2 | `0x5aef72ea72d44eea9d6d625bbc661b98084ce1236dd6eef950b0b9467e913cda` |
 
-Verdict text (real leader output, deterministic cross-check engaged and did not reject it — the leader's arithmetic agreed): *"HELD. The posting-time price was 1863.43…, the deadline-time price was 1863.43…, and the threshold was 100.0. Because the claim was above 100.0 and the deadline price 1863.43… exceeds 100.0, the claim HELD."*
+Verdict text, claim #1 (real leader output, both the deterministic cross-check and the new on-chain `get_stakers_for_claim` engaged): *"HELD. The claim that ETH/USD would remain above 100.0 is confirmed. At posting time the price was 1874.98…, and at the deadline it remained exactly 1874.98… — both figures decisively exceed the 100.0 threshold…"*
 
 Lock + `resolve_verdict` are keeper-driven in production. No user-facing lock/resolve button.
 
@@ -98,7 +101,37 @@ Lock + `resolve_verdict` are keeper-driven in production. No user-facing lock/re
 
 **Second retired court (`0x8b2fF616…`) — real payout-key collision found and fixed, not just theorized.** The payouts book matched "already paid?" on bare `claim_id` and treated a missing origin as an automatic pass. A payout row dated `2026-08-20T14:44:54Z` (1 GEN, from an earlier claim numbering) was silently satisfying that check for a claim #19 not created until `2026-08-23T03:06:12Z` — three days later, so it could not have been that claim's real payout. Fixed in `web/lib/genlayer/payouts.ts`: the origin check now fails closed, and every existing row is backfilled with its real origin (read from the transaction's own on-chain timestamp) the first time it's loaded. Full audit of every claim-id-keyed store in `web/lib/legacy-claim-ids.ts`'s header comment and this repo's commit history — payouts, the passport cache (was keyed by bare address with no origin at all), the passport `claim_history` merge, and the `?legacy=1` case-detail routing (a boolean couldn't disambiguate two retired courts) were all checked; claims and stakes already used composite `origin::id` keys and needed no change.
 
-**Claim #19's real winner is now paid.** `0x8b2fF616…`'s retirement (this deploy) means the keeper's own `eligible()` filter permanently excludes it from any future auto-retry, so the fix above closes the bug for every claim going forward but doesn't reach into the past — remediated manually, same pattern as claim 31 on the first retired court: real `getBalance` before/after, not just a tx status. Correction tx `0x9f7b38911367189e16c904d8edca0019110bb22e241e6ae6dd7bc960af9ac2be` — winner balance 778.46 → 788.46 GEN (+10 GEN, exactly what was owed).
+**Claim #19's real winner is now paid.** `0x8b2fF616…`'s retirement (the prior deploy) means the keeper's own `eligible()` filter permanently excludes it from any future auto-retry, so the fix above closes the bug for every claim going forward but doesn't reach into the past — remediated manually, same pattern as claim 31 on the first retired court: real `getBalance` before/after, not just a tx status. Correction tx `0x9f7b38911367189e16c904d8edca0019110bb22e241e6ae6dd7bc960af9ac2be` — winner balance 778.46 → 788.46 GEN (+10 GEN, exactly what was owed).
+
+## 4. Payout authority and deadline enforcement
+
+**Real steward review feedback, quoted in full:** *"Contract-held stakes and appeal bonds must either be released through a working repository-backed payout/refund path or the staking design must stop custodying funds it cannot return. Derive or verify every keeper recipient and amount against contract state instead of trusting the unauthenticated stake cache, and enforce the staking and appeal deadlines inside the contract methods. Add tests showing fabricated or missing cache rows cannot change payouts and that late stakes and appeals revert."*
+
+Both findings confirmed real on direct inspection, both fixed at the contract level, not worked around in the frontend.
+
+**4a. Keeper payout authority.** `creditResolvedWinners`/`creditRefundedStakers` built the winner/staker list from the Redis stake cache (`web/lib/genlayer/stakes.ts`) — mutable, unauthenticated, built for UI display speed and rate-limit mitigation, never meant to be a financial source of truth. `alpha_court.py` gained `get_stakers_for_claim`, a new view enumerating every real staker + side + amount straight from contract storage (`get_stake` alone requires already knowing which address to ask about — the cache was the only prior source of that address list). The keeper's crediting functions now call this exclusively; the cache is never consulted for a payout decision.
+
+**Proof, real and adversarial, not claimed:**
+
+| Test | What it proves |
+|---|---|
+| Real claim, real 2 GEN stake, local cache row fabricated to say 999 GEN, then real `creditResolvedWinners` called | Real payout sent was exactly 3 GEN (2 GEN stake + 1 GEN losing-pool share) — the real on-chain amount, not the fabricated one. Real `getBalance`: 30.0 → 33.0 GEN |
+| Real claim, real 3 GEN stake, zero cache rows ever existed for that staker (simulating deletion), then real `creditResolvedWinners` called | Keeper still correctly identified the real staker via `get_stakers_for_claim` and paid their full 3 GEN. Real `getBalance`: 3.0 → 6.0 GEN |
+
+Full transcript, real claim/tx hashes in §3 above; methodology in `web/scripts/verify-keeper-ignores-cache.mjs`.
+
+**4b. Deadline enforcement.** `_stake` and `file_appeal` checked only `claim.state` — `OPEN`/`CONTESTED` respectively — never an independent timestamp. State only changes when someone calls `lock_deadline_evidence`/`expire_appeal`, both permissionless but not automatic, leaving a real window where the real deadline (or the real 48-hour appeal window) had already passed but state hadn't moved. `_stake` now checks `gl.message_raw["datetime"] >= claim.deadline` directly; `file_appeal` now checks `_appeal_window_elapsed(claim.contested_at, ...)` directly — the exact helper `expire_appeal` already used for the opposite direction. Both independent of state.
+
+**Proof** (`contract/test/direct/test_deadline_enforcement.py`, 4 passed — state deliberately left unmoved, deadline/window backdated via direct storage reach-in, the same established pattern `test_appeals.py`'s `force_contested_at` already used):
+
+| Test | What it proves |
+|---|---|
+| `test_stake_after_real_deadline_reverts_even_though_state_is_still_open` | A stake with a real, already-passed deadline reverts on the timestamp check alone, `lock_deadline_evidence` never called |
+| `test_stake_before_deadline_still_succeeds` | Sanity: a genuinely on-time stake is unaffected |
+| `test_file_appeal_after_real_window_elapsed_reverts_even_though_state_is_still_contested` | A late appeal with a real, already-elapsed 48h window reverts on the timestamp check alone, `expire_appeal` never called |
+| `test_file_appeal_within_window_still_succeeds` | Sanity: a genuinely on-time appeal is unaffected |
+
+**Chosen path, stated directly (per the steward's own framing of the choice):** fixed the payout/refund path so it's genuinely verifiable against contract state, rather than redesigning the staking model to avoid custody entirely. The keeper-native-send architecture stays (forced by the real Studio IC→EOA limitation, §2) — what changed is *where the keeper's recipient/amount data comes from*.
 
 ## Known limitations
 

@@ -6,7 +6,7 @@ import { keeperAddress, readNativeBalance, sendAsKeeper } from "./client";
 import { attoToGenString } from "./atto";
 import { payoutsFor, recordPayout, type PayoutTransfer } from "./payouts";
 import { currentCourtAddress, originOf } from "../legacy-claim-ids";
-import { allStakePositions, parsePosKey } from "./stakes";
+import { stakersFromChain } from "./onchain-stakers";
 import { acquireLock, releaseLock } from "../persist";
 import { alreadyCredited, creditedCount } from "./payout-credit-rules";
 
@@ -33,11 +33,6 @@ function posAtto(raw: string | null | undefined): bigint {
   } catch {
     return 0n;
   }
-}
-
-function sameOrigin(posOrigin: string | null, claimOrigin: string): boolean {
-  if (!posOrigin) return true;
-  return posOrigin.toLowerCase() === claimOrigin.toLowerCase();
 }
 
 
@@ -77,15 +72,17 @@ async function creditResolvedWinnersLocked(
 
   const claimOrigin = (claim.origin_contract || originOf(claim) || currentCourtAddress()).toLowerCase();
   const keeper = (keeperAddress() || "").toLowerCase();
-  const pos = (await allStakePositions()).positions;
+  // Real, fresh contract read -- never the Redis stake cache. A fabricated
+  // or corrupted cache row cannot change who gets paid or how much, and a
+  // deleted cache row cannot cause a real staker to be missed, because the
+  // cache is never consulted here at all.
+  const onChainStakers = await stakersFromChain(claimId);
   const winners = new Map<string, bigint>();
-  for (const [key, row] of Object.entries(pos)) {
-    const parsed = parsePosKey(key);
-    if (!parsed || parsed.id !== claimId || parsed.side !== side) continue;
-    if (!sameOrigin(parsed.origin, claimOrigin)) continue;
-    const stake = posAtto(row.amountAtto);
+  for (const staker of onChainStakers) {
+    if (staker.side !== side) continue;
+    const stake = posAtto(staker.amountAtto);
     if (stake <= 0n) continue;
-    winners.set(parsed.addr, (winners.get(parsed.addr) ?? 0n) + stake);
+    winners.set(staker.address, (winners.get(staker.address) ?? 0n) + stake);
   }
 
   const credited: PayoutTransfer[] = [];
@@ -169,15 +166,14 @@ async function creditRefundedStakersLocked(
     appeal_outcome?: string;
     appeal_bond?: string;
   };
-  const pos = (await allStakePositions()).positions;
+  // Real, fresh contract read -- never the Redis stake cache. See
+  // creditResolvedWinnersLocked for the full reasoning.
+  const onChainStakers = await stakersFromChain(claimId);
   const stakes = new Map<string, bigint>();
-  for (const [key, row] of Object.entries(pos)) {
-    const parsed = parsePosKey(key);
-    if (!parsed || parsed.id !== claimId) continue;
-    if (!sameOrigin(parsed.origin, claimOrigin)) continue;
-    const stake = posAtto(row.amountAtto);
+  for (const staker of onChainStakers) {
+    const stake = posAtto(staker.amountAtto);
     if (stake <= 0n) continue;
-    stakes.set(parsed.addr, (stakes.get(parsed.addr) ?? 0n) + stake);
+    stakes.set(staker.address, (stakes.get(staker.address) ?? 0n) + stake);
   }
 
   const credited: PayoutTransfer[] = [];

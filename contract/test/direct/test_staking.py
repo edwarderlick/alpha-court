@@ -564,3 +564,79 @@ def test_full_state_machine_with_staking(direct_vm, direct_deploy, direct_alice,
 	assert claim["state"] == "RESOLVED"
 	assert claim["consensus_result"] == "HELD"
 	assert claim["verdict_text"] != ""
+
+
+# ---------------------------------------------------------------------
+# get_stakers_for_claim -- real on-chain enumeration for the keeper's
+# payout derivation (steward review finding: payouts must be verifiable
+# against contract state, not the Redis cache)
+# ---------------------------------------------------------------------
+
+
+def test_get_stakers_for_claim_enumerates_real_stakers(
+	direct_vm, direct_deploy, direct_alice, direct_bob, direct_charlie
+):
+	contract = deploy(direct_deploy)
+	direct_vm.sender = direct_alice
+	mock_price(direct_vm, 2950.5)
+	claim_id = contract.create_claim("ETH/USD", "3000", "above", FUTURE_DEADLINE)
+
+	direct_vm.sender = direct_bob
+	direct_vm.value = int(2 * ATTO)
+	contract.stake_for(claim_id)
+	direct_vm.value = 0
+
+	direct_vm.sender = direct_charlie
+	direct_vm.value = int(3 * ATTO)
+	contract.stake_against(claim_id)
+	direct_vm.value = 0
+
+	stakers = contract.get_stakers_for_claim(claim_id)
+	by_addr = {s["address"].lower(): s for s in stakers}
+	bob_hex = ("0x" + direct_bob.hex()).lower()
+	charlie_hex = ("0x" + direct_charlie.hex()).lower()
+
+	assert len(stakers) == 2
+	assert by_addr[bob_hex]["side"] == "for"
+	assert int(by_addr[bob_hex]["amount_atto"]) == 2 * ATTO
+	assert by_addr[charlie_hex]["side"] == "against"
+	assert int(by_addr[charlie_hex]["amount_atto"]) == 3 * ATTO
+
+
+def test_get_stakers_for_claim_empty_when_nobody_staked(direct_vm, direct_deploy, direct_alice):
+	contract = deploy(direct_deploy)
+	direct_vm.sender = direct_alice
+	mock_price(direct_vm, 2950.5)
+	claim_id = contract.create_claim("ETH/USD", "3000", "above", FUTURE_DEADLINE)
+
+	assert contract.get_stakers_for_claim(claim_id) == []
+
+
+def test_get_stakers_for_claim_does_not_leak_other_claims(
+	direct_vm, direct_deploy, direct_alice, direct_bob, direct_charlie
+):
+	"""Two claims, one staker each -- confirms the prefix filter is exact,
+	not a loose substring match that could leak a different claim's real
+	staker into this one's payout derivation."""
+	contract = deploy(direct_deploy)
+	direct_vm.sender = direct_alice
+	mock_price(direct_vm, 2950.5)
+	claim_a = contract.create_claim("ETH/USD", "3000", "above", FUTURE_DEADLINE)
+	claim_b = contract.create_claim("ETH/USD", "3000", "above", FUTURE_DEADLINE)
+
+	direct_vm.sender = direct_bob
+	direct_vm.value = int(2 * ATTO)
+	contract.stake_for(claim_a)
+	direct_vm.value = 0
+
+	direct_vm.sender = direct_charlie
+	direct_vm.value = int(3 * ATTO)
+	contract.stake_for(claim_b)
+	direct_vm.value = 0
+
+	stakers_a = contract.get_stakers_for_claim(claim_a)
+	stakers_b = contract.get_stakers_for_claim(claim_b)
+	assert len(stakers_a) == 1
+	assert len(stakers_b) == 1
+	assert stakers_a[0]["address"].lower() == ("0x" + direct_bob.hex()).lower()
+	assert stakers_b[0]["address"].lower() == ("0x" + direct_charlie.hex()).lower()

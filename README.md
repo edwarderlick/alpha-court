@@ -9,7 +9,7 @@
 
 **Live demo:** [alpha-court.vercel.app](https://alpha-court.vercel.app)
 
-Live Studionet court (chain `61999`): [`0x22Cf7A9eA315e6EcE6C2BCBF60F0f656C39CCEE4`](https://studio.genlayer.com)
+Live Studionet court (chain `61999`): [`0xF9Df5e7b7E2119FC8186f7f21Dd37E075a4aCe85`](https://studio.genlayer.com)
 
 Alpha Court is a prediction-market court. A claim is a timed, staked question about the world. Validators freeze public evidence at the deadline and try to agree **HELD** or **BROKEN**. If they cannot agree, the claim is **CONTESTED**: a 48-hour appeal window, then a second consensus round or a refund.
 
@@ -36,14 +36,15 @@ Jump to: [Critical platform reality](#critical-platform-reality) · [What Alpha 
 
 The UI says **Paid** / **Returned** only after a keeper send has **increased the wallet balance**. That split is intentional. This repo does not claim trustless or automatic *payout*.
 
-**Two retired courts (do not settle on either — legacy docket, read-only):**
+**Three retired courts (do not settle on any — legacy docket, read-only):**
 
 | Address | Retired because |
 |---|---|
 | `0xd3cD69C30A4e899bA2D346723bffac066543cF97` | Superseded by the second deployment below. Historical unpaid winners are a known leftover from an earlier pass; only claim 31 was made whole there. |
-| `0x8b2fF616d26Cb9bE48f4484BD5F8E7Cdaeca7902` | Source and deployed bytecode drifted apart: the deterministic outcome cross-check (`_naive_outcome`, closing a FairSplit-shaped consensus gap) was added to `alpha_court.py` after this deployment, so its live bytecode never had the fix. Redeployed fresh rather than patched in place — a contract can't be upgraded after the fact. Its 22 settled claims are preserved and still readable through the same legacy-docket merge this app already used for the first retirement. |
+| `0x8b2fF616d26Cb9bE48f4484BD5F8E7Cdaeca7902` | Source and deployed bytecode drifted apart: the deterministic outcome cross-check (`_naive_outcome`, closing a FairSplit-shaped consensus gap) was added to `alpha_court.py` after this deployment, so its live bytecode never had the fix. Its 22 settled claims are preserved through the legacy-docket merge. |
+| `0x22Cf7A9eA315e6EcE6C2BCBF60F0f656C39CCEE4` | Real steward review found two more gaps this deployment's bytecode never had the fix for: the keeper's payout decision read the Redis stake cache instead of contract state, and `stake_for`/`stake_against`/`file_appeal` enforced deadlines only via `claim.state`, not an independent timestamp check. Both fixed in `alpha_court.py` (`get_stakers_for_claim` + direct `gl.message_raw["datetime"]` checks) — see "Payout authority and deadline enforcement" below. |
 
-Claim ids restart from 1 on every new deployment, so every store that looks claims up by id is keyed by `origin_contract::claim_id`, never a bare id — see `web/lib/legacy-claim-ids.ts`.
+Contracts can't be upgraded in place, so each fix above meant a fresh deployment rather than a patch. Claim ids restart from 1 on every new deployment, so every store that looks claims up by id is keyed by `origin_contract::claim_id`, never a bare id — see `web/lib/legacy-claim-ids.ts`.
 
 ---
 
@@ -155,6 +156,20 @@ On a long-lived Node process (`next dev` / `next start`), the keeper also runs `
 **UI.** My Stakes marks **Paid** or **Returned** only after `getBalance` actually increased. An indexed IC child is not enough.
 
 **Idempotency.** Keeper skips an address that already has a payout/refund row for that claim and origin.
+
+---
+
+## Payout authority and deadline enforcement
+
+Real steward review, two findings, both fixed:
+
+**1. The keeper's payout decision now comes from the contract, never the cache.** `creditResolvedWinners`/`creditRefundedStakers` used to build the winner/staker list from the Redis stake cache (`lib/genlayer/stakes.ts`) — a store built for UI display speed and rate-limit mitigation, mutable and unauthenticated. A wrong or missing row there had a real path to a wrong payout. `alpha_court.py` gained a new view, `get_stakers_for_claim`, that enumerates every real staker + side + amount straight from contract storage (`get_stake` alone wasn't enough — it requires already knowing which address to ask about, and the cache was the only prior source of that list). The keeper now calls this on every credit, and the cache is never consulted for the payout decision at all.
+
+Proven adversarially, for real, not just claimed: a real claim on the live court, real stakes, then two corrupted local-cache states before calling the real `creditResolvedWinners`:
+  - A fabricated cache row claiming 999 GEN staked (the real stake was 2 GEN) — the real payout sent was exactly 3 GEN (2 GEN stake + 1 GEN losing-pool share), and real `getBalance` confirmed it: 30.0 → 33.0 GEN. The fabricated row had zero effect.
+  - A cache row that never existed at all for a real staker (simulating deletion) — the keeper still correctly identified them via `get_stakers_for_claim` and paid their real 3 GEN stake in full: real balance 3.0 → 6.0 GEN.
+
+**2. Staking and appeal deadlines are now enforced inside the contract, not just via state.** `claim.state` only changes when someone actually calls `lock_deadline_evidence` / `expire_appeal` — permissionless, but not automatic. That left a real window where the real deadline (or the real 48-hour appeal window) had already passed but state hadn't moved yet, in which a late stake or a late appeal could otherwise succeed. `_stake` now checks `gl.message_raw["datetime"] >= claim.deadline` directly; `file_appeal` now checks `_appeal_window_elapsed(claim.contested_at, ...)` directly — both independent of state, both proven with real reverts in `contract/test/direct/test_deadline_enforcement.py` (state deliberately left unmoved, deadline backdated via direct storage reach-in, confirms the timestamp check alone stops it).
 
 ---
 

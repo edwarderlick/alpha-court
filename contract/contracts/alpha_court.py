@@ -1555,6 +1555,35 @@ class AlphaCourt(gl.Contract):
 		return self.stakes[key].amount_atto
 
 	@gl.public.view
+	def get_stakers_for_claim(self, claim_id: str) -> list[dict]:
+		"""
+		Enumerates every real staker + side + amount for a claim straight
+		from contract storage -- the one source of truth for who's owed
+		what. Steward review finding: the keeper's actual payout decision
+		must be derived from or verified against a fresh contract read,
+		never the Redis stake cache (mutable, unauthenticated, built only
+		for UI display speed and rate-limit mitigation). get_stake alone
+		can't serve that purpose -- it requires already knowing which
+		address to ask about, and the cache was the only prior source of
+		that address list. This closes that gap by exposing the real
+		enumeration get_stake was always missing.
+		"""
+		prefix = f"{claim_id}:"
+		out: list[dict] = []
+		for key in self.stake_keys:
+			if not key.startswith(prefix):
+				continue
+			stake = self.stakes[key]
+			if stake.amount_atto <= 0:
+				continue
+			out.append({
+				"address": stake.staker.as_hex,
+				"side": stake.side,
+				"amount_atto": stake.amount_atto,
+			})
+		return out
+
+	@gl.public.view
 	def get_passport(self, address_hex: str) -> dict:
 		"""
 		Task 5: win count, loss count, claim-type-keyed category breakdown,
@@ -1884,9 +1913,24 @@ class AlphaCourt(gl.Contract):
 		self._stake(claim_id, STAKE_SIDE_AGAINST)
 
 	def _stake(self, claim_id: str, side: str) -> None:
+		"""
+		state == OPEN alone is not sufficient: OPEN only ever changes when
+		someone actually calls lock_deadline_evidence, which is
+		permissionless but not automatic -- there is a real window between
+		the real deadline passing and that call landing where state is
+		still OPEN. Without an independent timestamp check here, a stake
+		placed in that window would count even though it's genuinely late
+		(steward review finding: enforce deadlines in the contract itself,
+		not by trusting an external keeper to call the transition in
+		time). Checked directly against gl.message_raw["datetime"], same
+		source and same string-lexical ISO8601 comparison
+		lock_deadline_evidence already uses for the opposite direction.
+		"""
 		claim = self._get_claim(claim_id)
 		if claim.state != ClaimState.OPEN:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} claim is not OPEN")
+		if gl.message_raw["datetime"] >= claim.deadline:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} deadline has already passed")
 
 		amount = gl.message.value
 		if amount < MIN_STAKE_ATTO:
@@ -2256,10 +2300,21 @@ class AlphaCourt(gl.Contract):
 		resting state: this call does nothing beyond recording the filer
 		and bond, and transitioning state -- the second consensus round and
 		its resolution are resolve_appeal's job, a distinct later call.
+
+		state == CONTESTED alone is not sufficient: it only ever changes
+		once someone actually calls expire_appeal, which is permissionless
+		but not automatic -- there is a real window after the real 48-hour
+		appeal window elapses where state is still CONTESTED. Without an
+		independent timestamp check here, a late appeal filed in that
+		window would succeed (steward review finding, same class as
+		_stake's). Reuses _appeal_window_elapsed, the exact same helper
+		expire_appeal already checks against for the opposite direction.
 		"""
 		claim = self._get_claim(claim_id)
 		if claim.state != ClaimState.CONTESTED:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} claim is not CONTESTED")
+		if _appeal_window_elapsed(claim.contested_at, gl.message_raw["datetime"]):
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} appeal window has elapsed")
 
 		bond = gl.message.value
 		if bond != claim.appeal_bond_atto:

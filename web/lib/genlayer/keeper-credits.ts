@@ -1,16 +1,34 @@
 import "server-only";
 import type { Address } from "viem";
-import { bookGet } from "./book";
 import type { ClaimSummary } from "./claim-display";
-import { keeperAddress, readNativeBalance, sendAsKeeper } from "./client";
+import { keeperAddress, readClaimRaw, readNativeBalance, sendAsKeeper } from "./client";
 import { attoToGenString } from "./atto";
 import { payoutsFor, recordPayout, type PayoutTransfer } from "./payouts";
-import { currentCourtAddress, originOf } from "../legacy-claim-ids";
+import { currentCourtAddress } from "../legacy-claim-ids";
 import { stakersFromChain } from "./onchain-stakers";
 import { acquireLock, releaseLock } from "../persist";
 import { alreadyCredited, creditedCount } from "./payout-credit-rules";
 
 const CREDIT_LOCK_TTL_MS = 3 * 60 * 1000;
+
+/**
+ * Real, fresh contract read for the fields that actually decide a payout:
+ * state, consensus_result, both pool totals, and the appeal fields. Same
+ * gap as the stake cache, one layer up -- get_stakers_for_claim already
+ * made the staker LIST come from the chain, but state/outcome/pools were
+ * still read from the Redis book, so a cooked book row could still pay
+ * the wrong side or the wrong amount, and a missing book row could make a
+ * genuinely RESOLVED claim pay nobody at all. readClaimRaw always targets
+ * the live contract (CONTRACT_ADDRESS), so the claim's real origin is
+ * simply the current court -- no book lookup needed for that either.
+ */
+async function readClaimFromChain(claimId: string): Promise<ClaimSummary | null> {
+  try {
+    return (await readClaimRaw("get_claim", [claimId], { bypass: true })) as ClaimSummary;
+  } catch {
+    return null;
+  }
+}
 
 function winningSide(consensus: string): "for" | "against" | null {
   if (consensus === "HELD") return "for";
@@ -61,7 +79,7 @@ async function creditResolvedWinnersLocked(
   claimId: string,
   parentTx: string
 ): Promise<PayoutTransfer[]> {
-  const claim = await bookGet(claimId);
+  const claim = await readClaimFromChain(claimId);
   if (!claim || claim.state !== "RESOLVED") return [];
   const side = winningSide(claim.consensus_result);
   if (!side) return [];
@@ -70,7 +88,7 @@ async function creditResolvedWinnersLocked(
   const losePool = genStringToAtto(side === "for" ? claim.stake_against_total : claim.stake_for_total);
   if (winPool <= 0n) return [];
 
-  const claimOrigin = (claim.origin_contract || originOf(claim) || currentCourtAddress()).toLowerCase();
+  const claimOrigin = currentCourtAddress();
   const keeper = (keeperAddress() || "").toLowerCase();
   // Real, fresh contract read -- never the Redis stake cache. A fabricated
   // or corrupted cache row cannot change who gets paid or how much, and a
@@ -157,10 +175,10 @@ async function creditRefundedStakersLocked(
   claimId: string,
   parentTx: string
 ): Promise<PayoutTransfer[]> {
-  const claim = await bookGet(claimId);
+  const claim = await readClaimFromChain(claimId);
   if (!claim || claim.state !== "REFUNDED") return [];
 
-  const claimOrigin = (claim.origin_contract || originOf(claim) || currentCourtAddress()).toLowerCase();
+  const claimOrigin = currentCourtAddress();
   const keeper = (keeperAddress() || "").toLowerCase();
   const extra = claim as ClaimSummary & {
     appeal_outcome?: string;

@@ -61,16 +61,62 @@ function eligible(claim: KeeperClaim): boolean {
   return Number.isFinite(id) && id >= min;
 }
 
-async function loadClaims(): Promise<KeeperClaim[]> {
-  const { bookAll } = await import("./book");
-  return (await bookAll()).map((c) => ({
+function toKeeperClaim(c: ClaimSummary): KeeperClaim {
+  return {
     claim_id: c.claim_id,
     state: c.state,
     deadline: c.deadline,
     contested_at: c.contested_at,
     origin_contract: c.origin_contract,
     created_at: c.created_at,
-  }));
+  };
+}
+
+/**
+ * Which claims exist can never depend on the book knowing about them --
+ * a lost row, a write-path gap, anything -- would otherwise leave a real
+ * claim sitting unexamined forever with no error (round: "claim discovery
+ * must not depend on the book knowing a claim exists"). list_claims is a
+ * real enumeration straight from contract storage (self.claim_order), so
+ * it's the actual source of "which claims exist" for the current court.
+ * The book is still used underneath -- but only as a cache for claims it
+ * already knows about, never as the reason a claim is skipped entirely.
+ */
+export async function loadClaims(): Promise<KeeperClaim[]> {
+  const { bookAll, bookUpsert } = await import("./book");
+  const { currentCourtAddress } = await import("../legacy-claim-ids");
+  const book = await bookAll();
+  // list_claims only ever returns IDs for the current court -- a book row
+  // must be scoped to that same origin to count as "already known," or a
+  // stale bare-id row from a retired court (claim IDs restart on every
+  // redeploy) masks a real current-court claim with the same number. Same
+  // collision class as the payouts/passport bugs fixed earlier this project.
+  const current = currentCourtAddress();
+  const known = new Set(
+    book
+      .filter((c) => (c.origin_contract || "").toLowerCase() === current)
+      .map((c) => c.claim_id)
+  );
+
+  const discovered: KeeperClaim[] = [];
+  try {
+    const chainIds = (await readClaimRaw("list_claims", [], { bypass: true })) as string[];
+    for (const id of chainIds) {
+      if (known.has(id)) continue;
+      try {
+        const live = (await readClaimRaw("get_claim", [id], { bypass: true })) as ClaimSummary;
+        await bookUpsert(live);
+        discovered.push(toKeeperClaim(live));
+        console.log(`[keeper] discovered claim #${id} via chain enumeration (book had no row)`);
+      } catch (err) {
+        console.error(`[keeper] failed to fetch newly-discovered claim #${id}`, err);
+      }
+    }
+  } catch (err) {
+    console.error("[keeper] chain claim enumeration (list_claims) failed", err);
+  }
+
+  return [...book.map(toKeeperClaim), ...discovered];
 }
 
 export async function runKeeperTick(): Promise<KeeperTickResult> {

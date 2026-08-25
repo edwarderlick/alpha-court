@@ -6,10 +6,27 @@ import { attoToGenString } from "./atto";
 import { payoutsFor, recordPayout, type PayoutTransfer } from "./payouts";
 import { currentCourtAddress } from "../legacy-claim-ids";
 import { stakersFromChain } from "./onchain-stakers";
-import { acquireLock, releaseLock } from "../persist";
+import { acquireLock, releaseLock, storageKind } from "../persist";
 import { alreadyCredited, creditedCount } from "./payout-credit-rules";
+import { unsafeSignerWithoutRedis } from "./keeper-safety";
 
 const CREDIT_LOCK_TTL_MS = 3 * 60 * 1000;
+
+/**
+ * The credit lock (acquireLock/releaseLock) is only as trustworthy as the
+ * backend it runs on -- a real incident already happened once from
+ * runKeeperTick() being called with a real signer key and no Redis (see
+ * keeper-safety.ts). That guard only covered runKeeperTick(), but this
+ * project's own adversarial-testing convention calls these two credit
+ * functions directly, bypassing the tick loop entirely -- which caused a
+ * real duplicate send for real: a locally-run test (real signer key, disk
+ * backend) recorded a payout only in the local ledger, invisible to
+ * production's Redis ledger, which then paid the same claim again once it
+ * could see it. Guard here too, not just at the tick entry point.
+ */
+function creditingGuardReason(): string | null {
+  return unsafeSignerWithoutRedis(Boolean(process.env.ALPHA_COURT_SIGNER_PRIVATE_KEY), storageKind());
+}
 
 /**
  * Real, fresh contract read for the fields that actually decide a payout:
@@ -66,6 +83,11 @@ export async function creditResolvedWinners(
   claimId: string,
   parentTx: string
 ): Promise<PayoutTransfer[]> {
+  const unsafeReason = creditingGuardReason();
+  if (unsafeReason) {
+    console.error(`[keeper-credits] ${unsafeReason}`);
+    return [];
+  }
   const lockName = `credit:${claimId}`;
   if (!(await acquireLock(lockName, CREDIT_LOCK_TTL_MS))) return [];
   try {
@@ -162,6 +184,11 @@ export async function creditRefundedStakers(
   claimId: string,
   parentTx: string
 ): Promise<PayoutTransfer[]> {
+  const unsafeReason = creditingGuardReason();
+  if (unsafeReason) {
+    console.error(`[keeper-credits] ${unsafeReason}`);
+    return [];
+  }
   const lockName = `credit:${claimId}`;
   if (!(await acquireLock(lockName, CREDIT_LOCK_TTL_MS))) return [];
   try {

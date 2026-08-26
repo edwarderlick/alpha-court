@@ -230,6 +230,8 @@ export async function hashLoad(name: HashName): Promise<Record<string, string>> 
         }),
       ]);
       return parseHash(raw);
+    } catch {
+      return {};
     } finally {
       if (timer) clearTimeout(timer);
     }

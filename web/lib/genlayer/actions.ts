@@ -6,6 +6,7 @@ import { PendingTransferError, UnconfirmedSubmissionError } from "./errors";
 import { sendNativeToTreasury, waitForNativeTxFinalized } from "./deposit";
 import { studioCanWrite } from "./studio-gate";
 import { extractClaimId } from "./receipt";
+import { readClaimInBrowser } from "./browser-read";
 import {
   explainContractError,
   isDeadlinePassed,
@@ -79,10 +80,10 @@ function requireNumericClaimId(claimId: string): string {
 async function readLiveClaim(claimId: string): Promise<ClaimSummary> {
   const res = await fetch(`/api/claims/${encodeURIComponent(claimId)}`, { cache: "no-store" });
   const data = await res.json().catch(() => null);
-  if (!res.ok || !data?.claim) {
-    throw new Error(explainContractError(data?.error ?? "[EXPECTED] unknown claim_id"));
-  }
-  return data.claim as ClaimSummary;
+  if (res.ok && data?.claim) return data.claim as ClaimSummary;
+  const fromBrowser = await readClaimInBrowser(claimId);
+  if (fromBrowser) return fromBrowser;
+  throw new Error(explainContractError(data?.error ?? "[EXPECTED] unknown claim_id"));
 }
 
 async function assertStakeAllowed(claimId: string): Promise<ClaimSummary> {

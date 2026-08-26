@@ -6,6 +6,7 @@ import { bookAll, bookUpsert } from "@/lib/genlayer/book";
 import { apiErrorResponse } from "@/lib/genlayer/api-error";
 import { extractClaimId } from "@/lib/genlayer/receipt";
 import { isOnChainClaimId, type ClaimSummary } from "@/lib/genlayer/claim-display";
+import { withDeadline } from "@/lib/genlayer/rpc-retry";
 
 /**
  * GET  -> list every claim on the deployed contract (Category A-style cheap
@@ -18,13 +19,20 @@ import { isOnChainClaimId, type ClaimSummary } from "@/lib/genlayer/claim-displa
  *         forwarded to the contract as a string, unparsed -- see
  *         lib/genlayer/client.ts's header for why that's non-negotiable.
  */
+export const dynamic = "force-dynamic";
+export const maxDuration = 10;
+
 export async function GET() {
   try {
-    const claims = await getAllClaimsSafe();
+    const claims = await withDeadline(getAllClaimsSafe(), 6000, "list_claims");
     return NextResponse.json({ claims });
   } catch (err) {
-    const stale = await bookAll();
-    if (stale.length > 0) return NextResponse.json({ claims: stale, cached: true });
+    try {
+      const stale = await withDeadline(bookAll(), 1500, "bookAll");
+      if (stale.length > 0) return NextResponse.json({ claims: stale, cached: true });
+    } catch {
+      /* fall through */
+    }
     const { body, status } = apiErrorResponse(err);
     return NextResponse.json(body, { status });
   }

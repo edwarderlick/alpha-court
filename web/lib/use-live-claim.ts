@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ClaimSummary } from "@/lib/genlayer/claim-display";
 import { isDeadlinePassed } from "@/lib/genlayer/claim-display";
 import { subscribePulse } from "@/lib/market-pulse";
+import { readClaimInBrowser } from "@/lib/genlayer/browser-read";
 
 const STAKE_EVENT = "ac-stakes-changed";
 
@@ -93,6 +94,12 @@ async function pull(key: string, claimId: string, legacy: boolean, fresh: boolea
     if (data?.claim) {
       const next = data.claim as ClaimSummary;
       if (!sameSnapshot(ch.claim, next)) {
+        ch.claim = next;
+        ch.listeners.forEach((fn) => fn(next, ch.lastMeta));
+      }
+    } else if (!legacy) {
+      const next = await readClaimInBrowser(claimId);
+      if (next && !sameSnapshot(ch.claim, next)) {
         ch.claim = next;
         ch.listeners.forEach((fn) => fn(next, ch.lastMeta));
       }

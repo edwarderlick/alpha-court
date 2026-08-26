@@ -47,6 +47,23 @@ export function isTransientError(err: unknown): boolean {
   );
 }
 
+/** Bound a Studio/Redis call so a Vercel Hobby function can still return JSON
+ * instead of being killed mid-flight with an empty 500. */
+export async function withDeadline<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  try {
+    return await Promise.race([p, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    void p.catch(() => {
+      /* losing the race must not become an unhandled rejection */
+    });
+  }
+}
+
 export async function withTransientRetry<T>(
   fn: () => Promise<T>,
   attempts = 6,

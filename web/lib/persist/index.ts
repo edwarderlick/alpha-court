@@ -221,8 +221,18 @@ function toDisk(name: HashName, fields: Record<string, string>, refreshedAt: num
 export async function hashLoad(name: HashName): Promise<Record<string, string>> {
   const r = getRedis();
   if (r) {
-    const raw = await r.hgetall<Record<string, unknown>>(REDIS_HASH[name]);
-    return parseHash(raw);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const raw = await Promise.race([
+        r.hgetall<Record<string, unknown>>(REDIS_HASH[name]),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("redis hashLoad timed out")), 1000);
+        }),
+      ]);
+      return parseHash(raw);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
   if (storageKind() === "disk") {
     const loaded = fromDisk(name);

@@ -7,9 +7,10 @@ import { ClaimStatusLive } from "@/components/ClaimStatusLive";
 import { LiveStakePanel } from "@/components/LiveStakePanel";
 import { Countdown } from "@/components/Countdown";
 
-import { readOneClaim } from "@/lib/genlayer/client";
+import { readClaimRaw } from "@/lib/genlayer/client";
 import { findCachedClaim, getCachedClaims, rememberClaim } from "@/lib/genlayer/claims-cache";
 import { isAnyRateLimit, isUnknownClaimMessage, rpcBlocked } from "@/lib/genlayer/rpc-guard";
+import { withDeadline } from "@/lib/genlayer/rpc-retry";
 import type { ClaimSummary } from "@/lib/genlayer/claim-display";
 import {
   claimTitle,
@@ -99,6 +100,9 @@ function EvidenceSection({ claim }: { claim: Claim }) {
   );
 }
 
+export const dynamic = "force-dynamic";
+export const maxDuration = 10;
+
 // Converted from case_detail_pro_theme/code.html, then wired to real,
 // claim-type-adaptive get_claim data (Build Prompt 9 wired Price
 // Threshold only; Build Prompt 10 extends this to all three shapes plus
@@ -113,7 +117,16 @@ export default async function CaseDetailPage({
   const { id } = await params;
   const { legacy, preview, origin: originParam } = await searchParams;
   let claim: Claim;
-  const booked = await findCachedClaim(id, { preferLegacy: legacy === "1", origin: originParam });
+  let booked: ClaimSummary | null = null;
+  try {
+    booked = await withDeadline(
+      findCachedClaim(id, { preferLegacy: legacy === "1", origin: originParam }),
+      1500,
+      "bookGet"
+    );
+  } catch {
+    booked = null;
+  }
   const previewing =
     process.env.NODE_ENV !== "production" && preview === "APPEAL_PENDING";
 
@@ -168,14 +181,24 @@ export default async function CaseDetailPage({
     claim = booked as unknown as Claim;
   } else if (isOnChainClaimId(id)) {
     try {
-      claim = (await readOneClaim(id)) as Claim;
-      await rememberClaim(claim as unknown as ClaimSummary);
+      claim = (await withDeadline(
+        readClaimRaw("get_claim", [id], { bypass: true }),
+        6500,
+        "get_claim"
+      )) as Claim;
+      try {
+        await withDeadline(rememberClaim(claim as unknown as ClaimSummary), 1000, "bookUpsert");
+      } catch {
+        /* cache write must not fail the page */
+      }
     } catch (err) {
       if (booked) {
         claim = booked as unknown as Claim;
       } else {
         const detail = err instanceof Error ? err.message : String(err);
-        const known = ((await getCachedClaims()) ?? []).map((c) => Number(c.claim_id)).filter((n) => Number.isFinite(n));
+        const known = ((await withDeadline(getCachedClaims(), 1000, "bookAll").catch(() => null)) ?? [])
+          .map((c) => Number(c.claim_id))
+          .filter((n) => Number.isFinite(n));
         const maxKnown = known.length ? Math.max(...known) : 0;
         const n = Number(id);
         const implausible = Number.isInteger(n) && n > maxKnown + 100;

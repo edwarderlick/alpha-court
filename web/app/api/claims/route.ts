@@ -23,18 +23,25 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 10;
 
 export async function GET() {
+  const started = Date.now();
   try {
-    const claims = await withDeadline(getAllClaimsSafe(), 6000, "list_claims");
+    let booked: Awaited<ReturnType<typeof bookAll>> = [];
+    try {
+      booked = await withDeadline(bookAll(), 1500, "bookAll");
+    } catch {
+      /* Redis miss must not skip a short Studio attempt */
+    }
+    if (booked.length > 0) {
+      return NextResponse.json({ claims: booked, cached: true });
+    }
+    const claims = await withDeadline(getAllClaimsSafe(), 4000, "list_claims");
     return NextResponse.json({ claims });
   } catch (err) {
-    try {
-      const stale = await withDeadline(bookAll(), 1500, "bookAll");
-      if (stale.length > 0) return NextResponse.json({ claims: stale, cached: true });
-    } catch {
-      /* fall through */
-    }
     const { body, status } = apiErrorResponse(err);
-    return NextResponse.json(body, { status });
+    return NextResponse.json(
+      { ...body, claims: [], ms: Date.now() - started },
+      { status }
+    );
   }
 }
 

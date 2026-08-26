@@ -126,23 +126,28 @@ async function handleWalletRpc(method, params) {
   return hash;
 }
 
-// --- setup: a fresh OPEN claim on the live court (not the UI under test) ---
-const deadline = new Date(Date.now() + 25 * 60 * 1000).toISOString().replace(/\.\d+Z$/, ".000Z");
-console.log("creating OPEN claim on live court", COURT, "deadline", deadline);
-const createHash = await clientA.writeContract({
-  address: COURT,
-  functionName: "create_claim",
-  args: ["ETH/USD", "999998", "above", deadline, ""],
-  value: 0n,
-  account: accA,
-});
-await waitReceipt(clientA, createHash, "setup-create");
-const ids = await clientA.readContract({ address: COURT, functionName: "list_claims", args: [] });
-const claimId = String(ids.slice(-1)[0]);
+// --- setup: reuse CLAIM_ID if provided, else post a fresh OPEN claim ---
+let claimId = process.env.CLAIM_ID ? String(process.env.CLAIM_ID) : "";
+if (!claimId) {
+  const deadline = new Date(Date.now() + 25 * 60 * 1000).toISOString().replace(/\.\d+Z$/, ".000Z");
+  console.log("creating OPEN claim on live court", COURT, "deadline", deadline);
+  const createHash = await clientA.writeContract({
+    address: COURT,
+    functionName: "create_claim",
+    args: ["ETH/USD", "999998", "above", deadline, ""],
+    value: 0n,
+    account: accA,
+  });
+  await waitReceipt(clientA, createHash, "setup-create");
+  const ids = await clientA.readContract({ address: COURT, functionName: "list_claims", args: [] });
+  claimId = String(ids.slice(-1)[0]);
+  result.createHash = createHash;
+  note("setup-claim", "PASS", `OPEN claim #${claimId}`);
+} else {
+  note("setup-claim", "PASS", `reusing claim #${claimId}`);
+}
 result.claimId = claimId;
-result.createHash = createHash;
 save();
-note("setup-claim", "PASS", `OPEN claim #${claimId}`);
 
 const claim = await clientA.readContract({ address: COURT, functionName: "get_claim", args: [claimId] });
 result.onChainBefore = { state: claim.state, deadline: claim.deadline, stake_against_total: claim.stake_against_total };
@@ -193,9 +198,12 @@ await page.addInitScript(
       isFlask: true,
       _metamask: { isUnlocked: async () => true },
       request: async ({ method, params }) => {
-        if (method === "eth_accounts") return authorized ? [address] : [];
+        if (method === "eth_accounts") {
+          return sessionStorage.getItem("ac-auth") === "1" || authorized ? [address] : [];
+        }
         if (method === "eth_requestAccounts") {
           authorized = true;
+          sessionStorage.setItem("ac-auth", "1");
           return [address];
         }
         if (method === "eth_chainId") return "0xf22f";
@@ -256,14 +264,17 @@ async function bodyText() {
   return (await page.locator("body").innerText().catch(() => "")).replace(/\s+/g, " ");
 }
 
-// 1. landing + connect
+// 1. landing (no wallet chip) then an AppShell page for connect
 await page.goto(PROD + "/", { waitUntil: "domcontentloaded", timeout: 90000 });
 await page.waitForTimeout(2000);
 await shot("01-landing");
 note("landing", "PASS", (await bodyText()).slice(0, 180));
 
+await page.goto(`${PROD}/how-verdicts-work`, { waitUntil: "domcontentloaded", timeout: 90000 });
+await page.waitForTimeout(1500);
+await shot("02-how-verdicts");
 const connectBtn = page.getByRole("button", { name: /connect wallet/i });
-await connectBtn.first().click();
+await connectBtn.first().click({ timeout: 30000 });
 await page.getByRole("heading", { name: /connect wallet/i }).waitFor({ timeout: 15000 });
 await shot("02-connect-modal");
 note("connect-modal", "PASS", "wallet modal open");
@@ -273,7 +284,7 @@ if ((await mm.count()) === 0) throw new Error("MetaMask not listed in wallet mod
 await mm.first().click();
 await page.waitForTimeout(1500);
 await shot("03-connected");
-const chipText = await page.locator("header, nav, body").innerText();
+const chipText = await bodyText();
 const connected = /0xcE0a|ce0ae5fc|cE0ae5fC/i.test(chipText) || (await page.getByText(/0xcE0a|ce0ae5/i).count()) > 0;
 note("connected", connected ? "PASS" : "WARN", connected ? `connected ${ADDR_B}` : chipText.slice(0, 220));
 
@@ -297,9 +308,24 @@ if ((await chip.count()) > 0) {
   );
 }
 
-// 2. case page: treasury + amount visible
-await page.goto(`${PROD}/cases/${claimId}`, { waitUntil: "domcontentloaded", timeout: 120000 });
-await page.waitForTimeout(4000);
+// 2. case page — retry if the RSC error boundary flashes on a slow Studio read
+async function openCasePage() {
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    await page.goto(`${PROD}/cases/${claimId}`, { waitUntil: "domcontentloaded", timeout: 120000 });
+    await page.waitForTimeout(2500);
+    const text = await bodyText();
+    if (/something went wrong/i.test(text)) {
+      note("case-retry", "WARN", `attempt ${attempt} hit error boundary`);
+      const retry = page.getByRole("button", { name: /try again/i });
+      if ((await retry.count()) > 0) await retry.first().click();
+      await page.waitForTimeout(3000);
+      continue;
+    }
+    return text;
+  }
+  return bodyText();
+}
+await openCasePage();
 await shot("04-case-loading");
 try {
   await page.getByText(/Stake on this claim/i).waitFor({ timeout: 90000 });

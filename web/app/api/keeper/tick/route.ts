@@ -22,6 +22,11 @@ export async function GET(req: NextRequest) {
     enabled: keeperEnabled(),
     minClaimId: keeperMinClaimId() || null,
     lastTick: getLastKeeperTick(),
+    contract:
+      process.env.ALPHA_COURT_CONTRACT_ADDRESS ||
+      process.env.NEXT_PUBLIC_ALPHA_COURT_CONTRACT_ADDRESS ||
+      null,
+    treasury: process.env.NEXT_PUBLIC_TREASURY_ADDRESS || null,
   });
 }
 

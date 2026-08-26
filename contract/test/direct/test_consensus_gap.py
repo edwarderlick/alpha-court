@@ -25,6 +25,7 @@ from test.direct.test_alpha_court import (
 	install_verdict_hook,
 	mock_price,
 )
+from test.direct.tx_helpers import bond_atto, register_appeal
 
 
 def _parse(text: str) -> str:
@@ -158,10 +159,7 @@ def test_resolve_appeal_cannot_store_held_when_second_text_parses_broken(
 		bob_for=2.0, charlie_against=2.0,
 		threshold="3000", direction="above", deadline_price=2000.0,
 	)
-	direct_vm.sender = direct_owner
-	direct_vm.value = int(float(contract.get_claim(claim_id)["appeal_bond"]) * 10**18)
-	contract.file_appeal(claim_id)
-	direct_vm.value = 0
+	register_appeal(contract, direct_vm, claim_id, bond_atto(contract, claim_id), direct_owner)
 	direct_vm.sender = direct_alice
 	contract.resolve_appeal(claim_id)
 	claim = contract.get_claim(claim_id)
@@ -188,10 +186,7 @@ def test_resolve_appeal_conflicting_words_are_no_agreement_not_a_side(
 		direct_vm, contract, direct_alice, direct_bob, direct_charlie, direct_owner,
 		bob_for=2.0, charlie_against=2.0,
 	)
-	direct_vm.sender = direct_owner
-	direct_vm.value = int(float(contract.get_claim(claim_id)["appeal_bond"]) * 10**18)
-	contract.file_appeal(claim_id)
-	direct_vm.value = 0
+	register_appeal(contract, direct_vm, claim_id, bond_atto(contract, claim_id), direct_owner)
 	direct_vm.sender = direct_alice
 	contract.resolve_appeal(claim_id)
 	claim = contract.get_claim(claim_id)

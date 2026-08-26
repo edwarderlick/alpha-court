@@ -5,7 +5,8 @@ import Link from "next/link";
 import { AppShell } from "@/components/AppShell";
 import { useAppState } from "@/lib/store";
 import { createClaim } from "@/lib/genlayer/actions";
-import { UnconfirmedSubmissionError } from "@/lib/genlayer/errors";
+import { PendingTransferError, UnconfirmedSubmissionError } from "@/lib/genlayer/errors";
+import { TREASURY_ADDRESS } from "@/lib/genlayer/treasury";
 import {
   isOnChainClaimId,
   MIN_DEADLINE_MS,
@@ -156,6 +157,7 @@ function StepTwo({ claimType, onBack }: { claimType: ClaimTypeKey; onBack: () =>
     | { kind: "done"; txHash: string; claimId?: string }
     | { kind: "error"; message: string }
     | { kind: "unconfirmed"; txHash: string }
+    | { kind: "waiting_transfer"; txHash: string }
   >({ kind: "idle" });
 
   const isOnchainMetric = ONCHAIN_METRICS.includes(metric);
@@ -222,6 +224,7 @@ function StepTwo({ claimType, onBack }: { claimType: ClaimTypeKey; onBack: () =>
       }
     }
 
+    const existing = status.kind === "waiting_transfer" ? status.txHash : undefined;
     setStatus({ kind: "pending" });
     const deadlineIso = deadlineDate.toISOString();
     const draft = (claimId: string): ClaimSummary => ({
@@ -244,7 +247,7 @@ function StepTwo({ claimType, onBack }: { claimType: ClaimTypeKey; onBack: () =>
     try {
       const result =
         claimType === "RELATIVE_PERFORMANCE"
-          ? await createClaim(wallet, { claimType, assetA, assetB, deadline: deadlineIso, postingStakeGen })
+          ? await createClaim(wallet, { claimType, assetA, assetB, deadline: deadlineIso, postingStakeGen }, existing)
           : claimType === "FUNDAMENTALS_THRESHOLD"
             ? await createClaim(wallet, {
                 claimType,
@@ -254,7 +257,7 @@ function StepTwo({ claimType, onBack }: { claimType: ClaimTypeKey; onBack: () =>
                 direction,
                 deadline: deadlineIso,
                 postingStakeGen,
-              })
+              }, existing)
             : await createClaim(wallet, {
                 claimType,
                 asset,
@@ -262,7 +265,7 @@ function StepTwo({ claimType, onBack }: { claimType: ClaimTypeKey; onBack: () =>
                 direction,
                 deadline: deadlineIso,
                 postingStakeGen,
-              });
+              }, existing);
       let claimId = typeof result.claimId === "string" ? result.claimId : "";
       if (!isOnChainClaimId(claimId)) {
         try {
@@ -304,6 +307,10 @@ function StepTwo({ claimType, onBack }: { claimType: ClaimTypeKey; onBack: () =>
         tab: tabForKind("created"),
       });
     } catch (err) {
+      if (err instanceof PendingTransferError) {
+        setStatus({ kind: "waiting_transfer", txHash: err.txHash });
+        return;
+      }
       if (err instanceof UnconfirmedSubmissionError) {
         setStatus({ kind: "unconfirmed", txHash: err.txHash });
         return;
@@ -509,7 +516,12 @@ function StepTwo({ claimType, onBack }: { claimType: ClaimTypeKey; onBack: () =>
             </label>
           </StepBlock>
 
-          <StepBlock n={claimType === "RELATIVE_PERFORMANCE" ? "03" : "04"} title="Your stake" hint="Optional. Skip is fine. A stake backs FOR (1-10 GEN)." delay="form-rise-4">
+          <StepBlock n={claimType === "RELATIVE_PERFORMANCE" ? "03" : "04"} title="Your stake" hint="Optional. Skip is fine. A stake backs FOR (1-10 GEN) sent to the published treasury — the court never holds it." delay="form-rise-4">
+            {parseFloat(postingStake) > 0 && (
+              <p className="font-mono text-[11px] text-on-surface-variant break-all mb-2">
+                Treasury {TREASURY_ADDRESS}
+              </p>
+            )}
             <div className="flex flex-wrap gap-2">
               {STAKE_CHIPS.map((chip) => (
                 <button
@@ -545,8 +557,10 @@ function StepTwo({ claimType, onBack }: { claimType: ClaimTypeKey; onBack: () =>
           >
             {status.kind === "pending"
               ? wallet.status === "connected"
-                ? "Confirm in wallet..."
+                ? "Confirm transfer, then register..."
                 : "Submitting to Studio..."
+              : status.kind === "waiting_transfer"
+                ? "Register transfer"
               : status.kind === "done"
                 ? "Claim created"
                 : "Submit claim"}
@@ -579,6 +593,12 @@ function StepTwo({ claimType, onBack }: { claimType: ClaimTypeKey; onBack: () =>
         {status.kind === "error" && (
           <div className="mt-6 bg-dispute-red/10 border border-dispute-red/40 p-5 font-mono text-sm text-dispute-red break-all">
             {status.message}
+          </div>
+        )}
+        {status.kind === "waiting_transfer" && (
+          <div className="mt-6 bg-arbitration-orange/10 border border-arbitration-orange/40 p-5 font-mono text-sm text-arbitration-orange break-all">
+            Stake transfer submitted (tx {status.txHash}) but Studio has not finalized it yet.
+            Visibility lag — do not send GEN again. Use Register transfer once it appears.
           </div>
         )}
         {status.kind === "unconfirmed" && (

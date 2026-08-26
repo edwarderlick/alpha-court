@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { writeClaim } from "@/lib/genlayer/client";
+import { depositThenWrite } from "@/lib/genlayer/client";
 import { bustClaimsCache } from "@/lib/genlayer/claims-cache";
 import { apiErrorResponse } from "@/lib/genlayer/api-error";
 import { requireStakeOpen } from "@/lib/genlayer/write-guards";
@@ -36,7 +36,11 @@ export async function POST(
 
   try {
     await requireStakeOpen(id);
-    const { txHash, receipt } = await writeClaim(functionName, [id], amountGen);
+    const { txHash, receipt } = await depositThenWrite(
+      functionName,
+      [id],
+      genFloatToAtto(amountGen)
+    );
     bustClaimsCache();
     const signer =
       (receipt as { from_address?: string }).from_address ||

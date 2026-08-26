@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { writeClaim, readOneClaim } from "@/lib/genlayer/client";
+import { readOneClaim, depositThenWrite } from "@/lib/genlayer/client";
+import { genFloatToAtto } from "@/lib/genlayer/atto";
 import { getAllClaimsSafe } from "@/lib/genlayer/claims";
 import { bookAll, bookUpsert } from "@/lib/genlayer/book";
 import { apiErrorResponse } from "@/lib/genlayer/api-error";
@@ -64,10 +65,10 @@ export async function POST(req: NextRequest) {
           { status: 400 }
         );
       }
-      const { txHash, receipt } = await writeClaim(
+      const { txHash, receipt } = await depositThenWrite(
         "create_relative_performance_claim",
         [assetA, assetB, deadline],
-        stake
+        genFloatToAtto(stake)
       );
       return NextResponse.json(await createdPayload(txHash, receipt));
     }
@@ -86,10 +87,10 @@ export async function POST(req: NextRequest) {
           { status: 400 }
         );
       }
-      const { txHash, receipt } = await writeClaim(
+      const { txHash, receipt } = await depositThenWrite(
         "create_fundamentals_claim",
         [asset, metric, thresholdValue, direction, deadline],
-        stake
+        genFloatToAtto(stake)
       );
       return NextResponse.json(await createdPayload(txHash, receipt));
     }
@@ -107,10 +108,10 @@ export async function POST(req: NextRequest) {
         { status: 400 }
       );
     }
-    const { txHash, receipt } = await writeClaim(
+    const { txHash, receipt } = await depositThenWrite(
       "create_claim",
       [asset, thresholdPrice, direction, deadline],
-      stake
+      genFloatToAtto(stake)
     );
     return NextResponse.json(await createdPayload(txHash, receipt));
   } catch (err) {

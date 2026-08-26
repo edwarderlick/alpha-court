@@ -9,7 +9,9 @@
 
 **Live demo:** [alpha-court.vercel.app](https://alpha-court.vercel.app)
 
-Live Studionet court (chain `61999`): [`0xF9Df5e7b7E2119FC8186f7f21Dd37E075a4aCe85`](https://studio.genlayer.com)
+Live Studionet court (chain `61999`): [`0x219e753176D1157bC22376e10d06e4E21E401417`](https://studio.genlayer.com)
+
+Published treasury EOA (stakes and bonds go here — the contract never holds GEN): [`0x374D46E81973dd8797f14f586AEE94AaC27e39A3`](https://studio.genlayer.com)
 
 Alpha Court is a prediction-market court. A claim is a timed, staked question about the world. Validators freeze public evidence at the deadline and try to agree **HELD** or **BROKEN**. If they cannot agree, the claim is **CONTESTED**: a 48-hour appeal window, then a second consensus round or a refund.
 
@@ -278,6 +280,7 @@ Copy `web/.env.example`. **Do not put real keys in git or in this README.**
 |---|---|---|
 | `ALPHA_COURT_CONTRACT_ADDRESS` | server | Contract for reads and keeper writes. **Required at build.** |
 | `NEXT_PUBLIC_ALPHA_COURT_CONTRACT_ADDRESS` | client | Same address for wallet-signed writes. **Required at build.** |
+| `NEXT_PUBLIC_TREASURY_ADDRESS` | client | Published EOA for stake/bond transfers. Not a secret. |
 | `NEXT_PUBLIC_GENLAYER_NETWORK` | client | `studionet` (default), `localnet`, `testnetAsimov`, `testnetBradbury` |
 | `ALPHA_COURT_SIGNER_PRIVATE_KEY` | server | Funded EOA for keeper native sends and optional demo signing |
 | `ALPHA_COURT_SIGNER_ADDRESS` | server | Optional public keeper address |

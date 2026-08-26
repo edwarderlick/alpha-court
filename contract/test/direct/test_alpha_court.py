@@ -65,7 +65,7 @@ FUTURE_DEADLINE = "2999-01-01T00:00:00.000Z"
 
 
 def deploy(direct_deploy):
-	return direct_deploy("alpha_court.py", "test-surf-key")
+	return direct_deploy("alpha_court.py", "test-surf-key", "0x1111111111111111111111111111111111111111")
 
 
 def mock_price(direct_vm, price: float):

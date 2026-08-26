@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { readClaim, writeClaim, genToAtto } from "@/lib/genlayer/client";
+import { readClaim, depositThenWrite, genToAtto } from "@/lib/genlayer/client";
 import { apiErrorResponse } from "@/lib/genlayer/api-error";
 import { isOnChainClaimId } from "@/lib/genlayer/claim-display";
 
@@ -35,7 +35,7 @@ export async function POST(
       return NextResponse.json({ error: "no appeal_bond on this claim" }, { status: 400 });
     }
 
-    const { txHash, receipt } = await writeClaim(
+    const { txHash, receipt } = await depositThenWrite(
       "file_appeal",
       [id],
       genToAtto(claim.appeal_bond)

@@ -5,7 +5,8 @@ import { useRouter } from "next/navigation";
 import { Countdown } from "@/components/Countdown";
 import { useAppState } from "@/lib/store";
 import { fileAppeal, resolveAppeal, expireAppeal } from "@/lib/genlayer/actions";
-import { UnconfirmedSubmissionError } from "@/lib/genlayer/errors";
+import { PendingTransferError, UnconfirmedSubmissionError } from "@/lib/genlayer/errors";
+import { TREASURY_ADDRESS } from "@/lib/genlayer/treasury";
 import { explainContractError, isOnChainClaimId } from "@/lib/genlayer/claim-display";
 import { useLiveClaim } from "@/lib/use-live-claim";
 import type { ClaimSummary } from "@/lib/genlayer/claim-display";
@@ -70,6 +71,7 @@ export function AppealPanel({
   const [status, setStatus] = useState<
     | { kind: "idle" }
     | { kind: "pending" }
+    | { kind: "waiting_transfer"; txHash: string }
     | { kind: "done"; txHash: string }
     | { kind: "error"; message: string }
     | { kind: "unconfirmed"; txHash: string }
@@ -87,6 +89,10 @@ export function AppealPanel({
         router.refresh();
       })
       .catch((err) => {
+        if (err instanceof PendingTransferError) {
+          setStatus({ kind: "waiting_transfer", txHash: err.txHash });
+          return;
+        }
         if (err instanceof UnconfirmedSubmissionError) {
           setStatus({ kind: "unconfirmed", txHash: err.txHash });
           return;
@@ -106,8 +112,9 @@ export function AppealPanel({
 
   async function callAppeal() {
     if (rejectPlaceholder()) return;
+    const existing = status.kind === "waiting_transfer" ? status.txHash : undefined;
     setStatus({ kind: "pending" });
-    await handleResult(fileAppeal(wallet, claimId, shownBond ?? "0"));
+    await handleResult(fileAppeal(wallet, claimId, shownBond ?? "0", existing));
   }
 
   async function callResolve() {
@@ -132,6 +139,14 @@ export function AppealPanel({
       {status.kind === "error" && (
         <div className="text-dispute-red font-label-mono-sm text-label-mono-sm break-all">
           {status.message}
+        </div>
+      )}
+      {status.kind === "waiting_transfer" && (
+        <div className="bg-arbitration-orange/10 border border-arbitration-orange/40 rounded-lg p-4 flex flex-col gap-2">
+          <p className="text-arbitration-orange font-label-mono-sm text-label-mono-sm break-all">
+            Bond transfer submitted (tx {status.txHash}) but Studio has not finalized it yet.
+            Visibility lag, not a failed send. Do not send the GEN again.
+          </p>
         </div>
       )}
       {status.kind === "unconfirmed" && (
@@ -161,8 +176,12 @@ export function AppealPanel({
         <div className="font-body-md text-body-md text-on-surface-variant">
           Required bond:{" "}
           <span className="text-on-surface font-bold">{shownBond ?? "—"} GEN</span> (25% of
-          pool, clamped 1-5 GEN — shown before you commit)
+          pool, clamped 1-5 GEN — send this exact amount to the treasury, then register
+          the tx hash. The court never holds the bond.)
         </div>
+        <p className="font-body-md text-body-md text-on-surface-variant break-all">
+          Treasury: <span className="font-mono text-on-surface">{TREASURY_ADDRESS}</span>
+        </p>
         {windowCloses && (
           <div className="font-label-mono-sm text-label-mono-sm text-on-surface-variant">
             Appeal window closes in: <Countdown targetIso={windowCloses} />
@@ -175,9 +194,11 @@ export function AppealPanel({
         >
           {status.kind === "pending"
             ? wallet.status === "connected"
-              ? "Confirm in wallet..."
+              ? "Confirm transfer, then register..."
               : "Submitting..."
-            : "File Appeal"}
+            : status.kind === "waiting_transfer"
+              ? "Register transfer"
+              : "File Appeal"}
         </button>
         {windowCloses && (
           <button

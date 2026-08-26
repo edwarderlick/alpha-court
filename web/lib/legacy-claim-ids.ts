@@ -35,12 +35,17 @@ export const RETIRED_COURTS: RetiredCourt[] = [
     label: "Legacy docket",
     cutoffMs: Date.parse("2026-08-23T17:25:00.000Z"),
   },
+  {
+    address: "0xF9Df5e7b7E2119FC8186f7f21Dd37E075a4aCe85".toLowerCase(),
+    label: "Legacy docket",
+    cutoffMs: Date.parse("2026-08-24T18:20:00.000Z"),
+  },
 ];
 
 /** When the CURRENT live court (currentCourtAddress()) took over from the
  * last entry in RETIRED_COURTS above. Update this alongside RETIRED_COURTS
  * every time the live court is redeployed and the prior one retired. */
-export const CURRENT_COURT_CUTOFF_MS = Date.parse("2026-08-24T18:20:00.000Z");
+export const CURRENT_COURT_CUTOFF_MS = Date.parse("2026-08-27T12:00:00.000Z");
 
 /** Claim ids that lived on the oldest retired deployment, from before this
  * app tracked origin_contract or created_at reliably enough to disambiguate

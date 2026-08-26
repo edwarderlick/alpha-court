@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import pytest
 
+from test.direct.tx_helpers import bond_atto, register_appeal
+
 from test.direct.test_alpha_court import FUTURE_DEADLINE, deploy, install_verdict_hook, mock_price
 from test.direct.test_appeals import HEDGE, install_hook
 from test.direct.test_fundamentals import (
@@ -49,10 +51,7 @@ def _lock_price_claim(direct_vm, direct_alice, contract, posting: float, deadlin
 
 
 def _file_and_resolve_appeal(direct_vm, direct_owner, direct_alice, contract, claim_id):
-	direct_vm.sender = direct_owner
-	direct_vm.value = int(float(contract.get_claim(claim_id)["appeal_bond"]) * ATTO)
-	contract.file_appeal(claim_id)
-	direct_vm.value = 0
+	register_appeal(contract, direct_vm, claim_id, bond_atto(contract, claim_id), direct_owner)
 	direct_vm.sender = direct_alice
 	contract.resolve_appeal(claim_id)
 

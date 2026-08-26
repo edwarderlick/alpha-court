@@ -2,7 +2,9 @@
 
 import { getWalletWriteClient, waitFinalizedInBrowser } from "./wallet";
 import { genToAtto, genFloatToAtto } from "./atto";
-import { UnconfirmedSubmissionError } from "./errors";
+import { PendingTransferError, UnconfirmedSubmissionError } from "./errors";
+import { sendNativeToTreasury, waitForNativeTxFinalized } from "./deposit";
+import { studioCanWrite } from "./studio-gate";
 import { extractClaimId } from "./receipt";
 import {
   explainContractError,
@@ -56,12 +58,15 @@ async function jsonOrThrow(res: Response) {
     if (data?.unconfirmed && data?.txHash) {
       throw new UnconfirmedSubmissionError(data.txHash, new Error(data.error ?? res.statusText));
     }
+    if (data?.pendingTransfer && data?.txHash) {
+      throw new PendingTransferError(data.txHash, data.error ?? res.statusText);
+    }
     throw new Error(explainContractError(data?.error ?? res.statusText));
   }
   return data;
 }
 
-export type WriteResult = { txHash: string; claimId?: string };
+export type WriteResult = { txHash: string; claimId?: string; transferHash?: string };
 
 function requireNumericClaimId(claimId: string): string {
   const id = claimId.trim();
@@ -96,12 +101,23 @@ async function assertStakeAllowed(claimId: string): Promise<ClaimSummary> {
   return claim;
 }
 
+async function depositIfNeeded(from: string, valueAtto: bigint): Promise<string> {
+  if (valueAtto <= 0n) return "";
+  if (!studioCanWrite()) {
+    throw new Error("Studio is rate-limiting writes. Check MetaMask Activity before sending again.");
+  }
+  const transferHash = await sendNativeToTreasury(from, valueAtto);
+  await waitForNativeTxFinalized(from, transferHash);
+  return transferHash;
+}
+
 export async function createClaim(
   wallet: WalletState,
   body:
     | { claimType: "PRICE_THRESHOLD"; asset: string; thresholdPrice: string; direction: string; deadline: string; postingStakeGen: number }
     | { claimType: "RELATIVE_PERFORMANCE"; assetA: string; assetB: string; deadline: string; postingStakeGen: number }
-    | { claimType: "FUNDAMENTALS_THRESHOLD"; asset: string; metric: string; thresholdValue: string; direction: string; deadline: string; postingStakeGen: number }
+    | { claimType: "FUNDAMENTALS_THRESHOLD"; asset: string; metric: string; thresholdValue: string; direction: string; deadline: string; postingStakeGen: number },
+  existingTransferHash?: string
 ): Promise<WriteResult> {
   if (requireSigningPath(wallet) === "demo") {
     const res = await fetch("/api/claims", {
@@ -113,57 +129,81 @@ export async function createClaim(
     return jsonOrThrow(res);
   }
 
-  const client = getWalletWriteClient(wallet.address!);
-  const value = genFloatToAtto(body.postingStakeGen ?? 0);
+  if (!studioCanWrite()) {
+    throw new Error("Studio is rate-limiting writes. Check MetaMask Activity before sending again.");
+  }
 
+  const value = genFloatToAtto(body.postingStakeGen ?? 0);
+  let transferHash = existingTransferHash || "";
+  if (existingTransferHash) {
+    await waitForNativeTxFinalized(wallet.address!, existingTransferHash);
+  } else {
+    transferHash = await depositIfNeeded(wallet.address!, value);
+  }
+
+  const client = getWalletWriteClient(wallet.address!);
   let functionName: string;
   let args: unknown[];
   if (body.claimType === "RELATIVE_PERFORMANCE") {
     functionName = "create_relative_performance_claim";
-    args = [body.assetA, body.assetB, body.deadline];
+    args = [body.assetA, body.assetB, body.deadline, transferHash];
   } else if (body.claimType === "FUNDAMENTALS_THRESHOLD") {
     functionName = "create_fundamentals_claim";
-    args = [body.asset, body.metric, body.thresholdValue, body.direction, body.deadline];
+    args = [body.asset, body.metric, body.thresholdValue, body.direction, body.deadline, transferHash];
   } else {
     functionName = "create_claim";
-    args = [body.asset, body.thresholdPrice, body.direction, body.deadline];
+    args = [body.asset, body.thresholdPrice, body.direction, body.deadline, transferHash];
   }
 
   const hash = await client.writeContract({
     address: CONTRACT_ADDRESS,
     functionName,
     args: args as never,
-    value,
+    value: 0n,
   });
   const receipt = await waitFinalizedInBrowser(client, hash);
-  return { txHash: hash, claimId: extractClaimId(receipt) };
+  return { txHash: hash, claimId: extractClaimId(receipt), transferHash };
 }
 
 export async function stake(
   wallet: WalletState,
   claimId: string,
   side: "for" | "against",
-  amountGen: number
+  amountGen: number,
+  existingTransferHash?: string
 ): Promise<WriteResult> {
   await assertStakeAllowed(claimId);
+  if (!studioCanWrite()) {
+    throw new Error("Studio is rate-limiting writes. Check MetaMask Activity before sending again.");
+  }
   if (requireSigningPath(wallet) === "demo") {
     const res = await fetch(`/api/claims/${claimId}/stake`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ side, amountGen }),
+      body: JSON.stringify({ side, amountGen, transferHash: existingTransferHash }),
     });
     return jsonOrThrow(res);
+  }
+
+  const value = genFloatToAtto(amountGen);
+  const transferHash =
+    existingTransferHash || (await depositIfNeeded(wallet.address!, value));
+  if (!existingTransferHash) {
+    // depositIfNeeded already waited; if the caller passed a hash they
+    // already saw as pending, wait once more before registering.
+  } else {
+    await waitForNativeTxFinalized(wallet.address!, transferHash);
   }
 
   const client = getWalletWriteClient(wallet.address!);
   const hash = await client.writeContract({
     address: CONTRACT_ADDRESS,
     functionName: side === "for" ? "stake_for" : "stake_against",
-    args: [claimId],
-    value: genFloatToAtto(amountGen),
+    args: [claimId, transferHash],
+    value: 0n,
   });
   await waitFinalizedInBrowser(client, hash);
-  return { txHash: hash };
+  return { txHash: hash, transferHash };
 }
 
 /**
@@ -175,23 +215,38 @@ export async function stake(
 export async function fileAppeal(
   wallet: WalletState,
   claimId: string,
-  appealBondDecimal: string
+  appealBondDecimal: string,
+  existingTransferHash?: string
 ): Promise<WriteResult> {
   const id = requireNumericClaimId(claimId);
+  if (!studioCanWrite()) {
+    throw new Error("Studio is rate-limiting writes. Check MetaMask Activity before sending again.");
+  }
   if (requireSigningPath(wallet) === "demo") {
-    const res = await fetch(`/api/claims/${id}/appeal`, { method: "POST" });
+    const res = await fetch(`/api/claims/${id}/appeal`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ transferHash: existingTransferHash }),
+    });
     return jsonOrThrow(res);
+  }
+
+  const value = genToAtto(appealBondDecimal);
+  const transferHash =
+    existingTransferHash || (await depositIfNeeded(wallet.address!, value));
+  if (existingTransferHash) {
+    await waitForNativeTxFinalized(wallet.address!, transferHash);
   }
 
   const client = getWalletWriteClient(wallet.address!);
   const hash = await client.writeContract({
     address: CONTRACT_ADDRESS,
     functionName: "file_appeal",
-    args: [id],
-    value: genToAtto(appealBondDecimal),
+    args: [id, transferHash],
+    value: 0n,
   });
   await waitFinalizedInBrowser(client, hash);
-  return { txHash: hash };
+  return { txHash: hash, transferHash };
 }
 
 export async function resolveAppeal(wallet: WalletState, claimId: string): Promise<WriteResult> {

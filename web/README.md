@@ -14,10 +14,11 @@ npm install
 Create `.env.local` (gitignored, never commit):
 
 ```
-# Live court. Three retired addresses (0xd3cD69C30A4e899bA2D346723bffac066543cF97,
-# 0x8b2fF616d26Cb9bE48f4484BD5F8E7Cdaeca7902, and 0x22Cf7A9eA315e6EcE6C2BCBF60F0f656C39CCEE4)
-# are read-only history -- never point a fresh setup at any of them.
-ALPHA_COURT_CONTRACT_ADDRESS=0xF9Df5e7b7E2119FC8186f7f21Dd37E075a4aCe85
+# Live court. Retired addresses are read-only history -- never point a
+# fresh setup at 0xd3cD69…, 0x8b2fF616…, 0x22Cf7A9e…, or 0xF9Df5e7b….
+ALPHA_COURT_CONTRACT_ADDRESS=0x219e753176D1157bC22376e10d06e4E21E401417
+NEXT_PUBLIC_ALPHA_COURT_CONTRACT_ADDRESS=0x219e753176D1157bC22376e10d06e4E21E401417
+NEXT_PUBLIC_TREASURY_ADDRESS=0x374D46E81973dd8797f14f586AEE94AaC27e39A3
 ALPHA_COURT_SIGNER_PRIVATE_KEY=0x...   # funded Studio testnet account, backend writes only
 SURF_API_KEY=sk-surf-...               # Category A display reads only (lib/surf/display.ts)
 ```
@@ -205,12 +206,11 @@ second calling pattern was added.
 
 ### Step 0 findings
 
-1. **`file_appeal`/`resolve_appeal` call shape**, confirmed against the
-   real deployed contract through the existing layer: `file_appeal(claim_id)`
-   is `@gl.public.write.payable` and requires `message.value` to equal the
-   claim's stored `appeal_bond_atto` **exactly**; `resolve_appeal(claim_id)`
-   and `expire_appeal(claim_id)` take no value and are permissionless
-   (no sender check, matching `resolve_verdict`'s own pattern).
+1. **`file_appeal`/`resolve_appeal` call shape** (historical, Build Prompt 10):
+   `file_appeal` used to be payable with exact `appeal_bond_atto`. **The live
+   court is not payable.** `file_appeal(claim_id, tx_hash)` verifies a native
+   send to the published treasury. `resolve_appeal`/`expire_appeal` still take
+   no value and are permissionless. See `SUBMISSION.md` §5.
 2. **Category A in TypeScript, not a Python bridge** — real decision,
    documented in `lib/surf/display.ts`'s header: the frontend is
    Next.js/TypeScript, the endpoints are three plain HTTP calls, and

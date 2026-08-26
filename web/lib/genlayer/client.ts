@@ -12,6 +12,7 @@ import {
 import { UnconfirmedSubmissionError } from "./errors";
 import { extractLeaderResult } from "./receipt";
 import { noteClaimChainRead, studioCanRead, studioCanWrite, studioNoteError } from "./studio-gate";
+import { TREASURY_ADDRESS } from "./treasury";
 
 export { genToAtto };
 
@@ -34,7 +35,9 @@ export { genToAtto };
  * shipped pattern -- see that file's own `requireDemoSigningEnabled`).
  */
 
-const RAW_CONTRACT_ADDRESS = process.env.ALPHA_COURT_CONTRACT_ADDRESS;
+const RAW_CONTRACT_ADDRESS =
+  process.env.ALPHA_COURT_CONTRACT_ADDRESS ||
+  process.env.NEXT_PUBLIC_ALPHA_COURT_CONTRACT_ADDRESS;
 const SIGNER_PRIVATE_KEY = process.env.ALPHA_COURT_SIGNER_PRIVATE_KEY as
   | `0x${string}`
   | undefined;
@@ -203,6 +206,23 @@ export async function writeClaim(
   value: number | bigint = 0
 ) {
   return submitWrite(getDemoClient(), functionName, args, value);
+}
+
+/**
+ * Demo path for the non-custodial deposit: send GEN to the treasury from
+ * the demo signer, then register the resulting tx hash with value 0.
+ */
+export async function depositThenWrite(
+  functionName: string,
+  args: CalldataArg[],
+  valueAtto: bigint
+) {
+  let transferHash = "";
+  if (valueAtto > 0n) {
+    const sent = await sendAsKeeper(TREASURY_ADDRESS, valueAtto);
+    transferHash = sent.txHash;
+  }
+  return submitWrite(getDemoClient(), functionName, [...args, transferHash], 0n);
 }
 
 /** Native GEN send from the keeper EOA. Studionet IC→EOA transfers do not credit. */

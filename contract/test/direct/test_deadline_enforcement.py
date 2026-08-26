@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import pytest
 
+from test.direct.tx_helpers import mock_studio_tx, next_tx_hash, register_appeal, register_stake
+
 from test.direct.test_alpha_court import FUTURE_DEADLINE, deploy, mock_price
 
 ATTO = 10**18
@@ -44,10 +46,9 @@ def test_stake_after_real_deadline_reverts_even_though_state_is_still_open(
 	contract.claims[claim_id] = claim
 
 	direct_vm.sender = direct_bob
-	direct_vm.value = int(2 * ATTO)
+	mock_studio_tx(direct_vm, sender=direct_bob, value_atto=int(2 * ATTO))
 	with direct_vm.expect_revert("deadline has already passed"):
-		contract.stake_for(claim_id)
-	direct_vm.value = 0
+		contract.stake_for(claim_id, next_tx_hash())
 
 	# No stake was actually recorded.
 	assert int(contract.get_stake(claim_id, "for", "0x" + direct_bob.hex())) == 0
@@ -63,10 +64,7 @@ def test_stake_before_deadline_still_succeeds(direct_vm, direct_deploy, direct_a
 	mock_price(direct_vm, 2950.5)
 	claim_id = contract.create_claim("ETH/USD", "3000", "above", FUTURE_DEADLINE)
 
-	direct_vm.sender = direct_bob
-	direct_vm.value = int(2 * ATTO)
-	contract.stake_for(claim_id)
-	direct_vm.value = 0
+	register_stake(contract, direct_vm, claim_id, "for", int(2 * ATTO), direct_bob)
 
 	assert int(contract.get_stake(claim_id, "for", "0x" + direct_bob.hex())) == 2 * ATTO
 
@@ -96,10 +94,8 @@ def test_file_appeal_after_real_window_elapsed_reverts_even_though_state_is_stil
 	contract.claims[claim_id] = stored
 
 	direct_vm.sender = direct_owner
-	direct_vm.value = int(float(claim["appeal_bond"]) * ATTO)
 	with direct_vm.expect_revert("appeal window has elapsed"):
-		contract.file_appeal(claim_id)
-	direct_vm.value = 0
+		contract.file_appeal(claim_id, next_tx_hash())
 
 	# No appeal was actually filed.
 	claim = contract.get_claim(claim_id)
@@ -121,10 +117,7 @@ def test_file_appeal_within_window_still_succeeds(
 	)
 	claim = contract.get_claim(claim_id)
 
-	direct_vm.sender = direct_owner
-	direct_vm.value = int(float(claim["appeal_bond"]) * ATTO)
-	contract.file_appeal(claim_id)
-	direct_vm.value = 0
+	register_appeal(contract, direct_vm, claim_id, int(float(claim["appeal_bond"]) * ATTO), direct_owner)
 
 	claim = contract.get_claim(claim_id)
 	assert claim["state"] == "APPEAL_PENDING"

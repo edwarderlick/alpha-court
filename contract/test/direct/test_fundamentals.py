@@ -25,7 +25,7 @@ ATTO = 10**18
 
 
 def deploy(direct_deploy):
-	return direct_deploy("alpha_court.py", "test-surf-key")
+	return direct_deploy("alpha_court.py", "test-surf-key", "0x1111111111111111111111111111111111111111")
 
 
 def fundamentals_offset() -> int:

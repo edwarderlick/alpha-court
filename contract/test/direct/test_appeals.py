@@ -32,6 +32,8 @@ import json
 
 import pytest
 
+from test.direct.tx_helpers import mock_studio_tx, next_tx_hash, register_appeal, register_stake
+
 FUTURE_DEADLINE = "2999-01-01T00:00:00.000Z"
 
 ATTO = 10**18
@@ -40,7 +42,7 @@ HEDGE = "This is genuinely too close to call either way."
 
 
 def deploy(direct_deploy):
-	return direct_deploy("alpha_court.py", "test-surf-key")
+	return direct_deploy("alpha_court.py", "test-surf-key", "0x1111111111111111111111111111111111111111")
 
 
 def mock_price(direct_vm, price: float):
@@ -134,25 +136,13 @@ def make_contested(
 	claim_id = contract.create_claim("ETH/USD", threshold, direction, FUTURE_DEADLINE)
 
 	if bob_for:
-		direct_vm.sender = direct_bob
-		direct_vm.value = int(bob_for * ATTO)
-		contract.stake_for(claim_id)
-		direct_vm.value = 0
+		register_stake(contract, direct_vm, claim_id, "for", int(bob_for * ATTO), direct_bob)
 	if charlie_for:
-		direct_vm.sender = direct_charlie
-		direct_vm.value = int(charlie_for * ATTO)
-		contract.stake_for(claim_id)
-		direct_vm.value = 0
+		register_stake(contract, direct_vm, claim_id, "for", int(charlie_for * ATTO), direct_charlie)
 	if charlie_against:
-		direct_vm.sender = direct_charlie
-		direct_vm.value = int(charlie_against * ATTO)
-		contract.stake_against(claim_id)
-		direct_vm.value = 0
+		register_stake(contract, direct_vm, claim_id, "against", int(charlie_against * ATTO), direct_charlie)
 	if owner_against:
-		direct_vm.sender = direct_owner
-		direct_vm.value = int(owner_against * ATTO)
-		contract.stake_against(claim_id)
-		direct_vm.value = 0
+		register_stake(contract, direct_vm, claim_id, "against", int(owner_against * ATTO), direct_owner)
 
 	force_evidence_locked(contract, claim_id, deadline_price)
 
@@ -222,10 +212,9 @@ def test_file_appeal_wrong_state_reverts(direct_vm, direct_deploy, direct_alice,
 	claim_id = contract.create_claim("ETH/USD", "3000", "above", FUTURE_DEADLINE)  # still OPEN
 
 	direct_vm.sender = direct_bob
-	direct_vm.value = int(1 * ATTO)
+	mock_studio_tx(direct_vm, sender=direct_bob, value_atto=int(1 * ATTO))
 	with direct_vm.expect_revert("claim is not CONTESTED"):
-		contract.file_appeal(claim_id)
-	direct_vm.value = 0
+		contract.file_appeal(claim_id, next_tx_hash())
 
 
 def test_file_appeal_wrong_bond_amount_reverts(
@@ -239,14 +228,13 @@ def test_file_appeal_wrong_bond_amount_reverts(
 	)
 
 	direct_vm.sender = direct_bob
-	direct_vm.value = int(1.9 * ATTO)  # too little
+	mock_studio_tx(direct_vm, sender=direct_bob, value_atto=int(1.9 * ATTO))
 	with direct_vm.expect_revert("appeal bond must be exactly the stored bond amount"):
-		contract.file_appeal(claim_id)
+		contract.file_appeal(claim_id, next_tx_hash())
 
-	direct_vm.value = int(2.1 * ATTO)  # too much
+	mock_studio_tx(direct_vm, sender=direct_bob, value_atto=int(2.1 * ATTO))
 	with direct_vm.expect_revert("appeal bond must be exactly the stored bond amount"):
-		contract.file_appeal(claim_id)
-	direct_vm.value = 0
+		contract.file_appeal(claim_id, next_tx_hash())
 
 
 def test_file_appeal_exact_bond_transitions_to_appeal_pending(
@@ -259,10 +247,7 @@ def test_file_appeal_exact_bond_transitions_to_appeal_pending(
 		bob_for=4.0, charlie_against=4.0,  # bond = 2 GEN exactly
 	)
 
-	direct_vm.sender = direct_bob
-	direct_vm.value = int(2.0 * ATTO)
-	contract.file_appeal(claim_id)
-	direct_vm.value = 0
+	register_appeal(contract, direct_vm, claim_id, int(2.0 * ATTO), direct_bob)
 
 	claim = contract.get_claim(claim_id)
 	assert claim["state"] == "APPEAL_PENDING"
@@ -314,10 +299,7 @@ def test_resolve_appeal_settled_held_returns_bond_to_filer(
 	claim = contract.get_claim(claim_id)
 	assert float(claim["appeal_bond"]) == pytest.approx(2.25, rel=1e-9)
 
-	direct_vm.sender = direct_charlie
-	direct_vm.value = int(2.25 * ATTO)
-	contract.file_appeal(claim_id)
-	direct_vm.value = 0
+	register_appeal(contract, direct_vm, claim_id, int(2.25 * ATTO), direct_charlie)
 
 	direct_vm.sender = direct_alice  # permissionless
 	contract.resolve_appeal(claim_id)
@@ -382,10 +364,7 @@ def test_resolve_appeal_settled_broken_returns_bond_regardless_of_side(
 		threshold="3000", direction="above", deadline_price=2000.0,
 	)
 
-	direct_vm.sender = direct_owner
-	direct_vm.value = int(2.25 * ATTO)
-	contract.file_appeal(claim_id)
-	direct_vm.value = 0
+	register_appeal(contract, direct_vm, claim_id, int(2.25 * ATTO), direct_owner)
 
 	direct_vm.sender = direct_alice
 	contract.resolve_appeal(claim_id)
@@ -438,10 +417,7 @@ def test_resolve_appeal_no_agreement_refunds_everyone_and_splits_bond_evenly(
 	claim = contract.get_claim(claim_id)
 	assert float(claim["appeal_bond"]) == pytest.approx(1.25, rel=1e-9)
 
-	direct_vm.sender = direct_owner
-	direct_vm.value = int(1.25 * ATTO)
-	contract.file_appeal(claim_id)
-	direct_vm.value = 0
+	register_appeal(contract, direct_vm, claim_id, int(1.25 * ATTO), direct_owner)
 
 	direct_vm.sender = direct_alice
 	contract.resolve_appeal(claim_id)
@@ -508,22 +484,12 @@ def test_resolve_appeal_no_agreement_bond_splits_per_address_not_per_record(
 	mock_price(direct_vm, 2950.5)
 	claim_id = contract.create_claim("ETH/USD", "3000", "above", FUTURE_DEADLINE)
 
-	direct_vm.sender = direct_bob
-	direct_vm.value = int(2 * ATTO)
-	contract.stake_for(claim_id)
-	direct_vm.value = 0
+	register_stake(contract, direct_vm, claim_id, "for", int(2 * ATTO), direct_bob)
 
-	direct_vm.sender = direct_charlie
-	direct_vm.value = int(4 * ATTO)
-	contract.stake_against(claim_id)
-	direct_vm.value = 0
+	register_stake(contract, direct_vm, claim_id, "against", int(4 * ATTO), direct_charlie)
 
-	direct_vm.sender = direct_alice
-	direct_vm.value = int(3 * ATTO)
-	contract.stake_for(claim_id)
-	direct_vm.value = int(3 * ATTO)
-	contract.stake_against(claim_id)
-	direct_vm.value = 0
+	register_stake(contract, direct_vm, claim_id, "for", int(3 * ATTO), direct_alice)
+	register_stake(contract, direct_vm, claim_id, "against", int(3 * ATTO), direct_alice)
 
 	force_evidence_locked(contract, claim_id, deadline_price=3500.0)
 	direct_vm.sender = direct_alice
@@ -532,10 +498,7 @@ def test_resolve_appeal_no_agreement_bond_splits_per_address_not_per_record(
 	assert claim["state"] == "CONTESTED"
 	assert float(claim["appeal_bond"]) == pytest.approx(3.0, rel=1e-9)
 
-	direct_vm.sender = direct_owner
-	direct_vm.value = int(3.0 * ATTO)
-	contract.file_appeal(claim_id)
-	direct_vm.value = 0
+	register_appeal(contract, direct_vm, claim_id, int(3.0 * ATTO), direct_owner)
 
 	direct_vm.sender = direct_alice
 	contract.resolve_appeal(claim_id)
@@ -578,10 +541,7 @@ def test_resolve_appeal_cannot_be_called_twice(
 		direct_vm, contract, direct_alice, direct_bob, direct_charlie, direct_owner,
 		bob_for=4.0, charlie_against=4.0,
 	)
-	direct_vm.sender = direct_bob
-	direct_vm.value = int(2.0 * ATTO)
-	contract.file_appeal(claim_id)
-	direct_vm.value = 0
+	register_appeal(contract, direct_vm, claim_id, int(2.0 * ATTO), direct_bob)
 
 	direct_vm.sender = direct_alice
 	contract.resolve_appeal(claim_id)

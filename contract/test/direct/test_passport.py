@@ -15,6 +15,8 @@ import json
 
 import pytest
 
+from test.direct.tx_helpers import bond_atto, register_appeal
+
 FUTURE_DEADLINE = "2999-01-01T00:00:00.000Z"
 
 ATTO = 10**18
@@ -23,7 +25,7 @@ HEDGE = "This is genuinely too close to call either way."
 
 
 def deploy(direct_deploy):
-	return direct_deploy("alpha_court.py", "test-surf-key")
+	return direct_deploy("alpha_court.py", "test-surf-key", "0x1111111111111111111111111111111111111111")
 
 
 def mock_price(direct_vm, price: float):
@@ -153,10 +155,7 @@ def test_passport_win_recorded_via_settled_appeal_path(direct_vm, direct_deploy,
 	claim_id = post_and_contest(direct_vm, contract, direct_alice)
 
 	install_hook(direct_vm, ["After further review, the claim was HELD."])
-	direct_vm.sender = direct_alice
-	direct_vm.value = int(float(contract.get_claim(claim_id)["appeal_bond"]) * ATTO)
-	contract.file_appeal(claim_id)
-	direct_vm.value = 0
+	register_appeal(contract, direct_vm, claim_id, bond_atto(contract, claim_id), direct_alice)
 
 	direct_vm.sender = direct_alice
 	contract.resolve_appeal(claim_id)
@@ -184,10 +183,7 @@ def test_passport_loss_recorded_via_settled_appeal_path(direct_vm, direct_deploy
 	claim_id = post_and_contest(direct_vm, contract, direct_alice, deadline_price=2000.0)
 
 	install_hook(direct_vm, ["After further review, the claim was BROKEN."])
-	direct_vm.sender = direct_alice
-	direct_vm.value = int(float(contract.get_claim(claim_id)["appeal_bond"]) * ATTO)
-	contract.file_appeal(claim_id)
-	direct_vm.value = 0
+	register_appeal(contract, direct_vm, claim_id, bond_atto(contract, claim_id), direct_alice)
 
 	direct_vm.sender = direct_alice
 	contract.resolve_appeal(claim_id)
@@ -225,10 +221,7 @@ def test_passport_refunded_no_agreement_does_not_change_win_loss(
 	refunded_claim_id = post_and_contest(direct_vm, contract, direct_alice)
 
 	install_hook(direct_vm, [HEDGE])  # round 2 ALSO hedges -> NO_AGREEMENT
-	direct_vm.sender = direct_alice
-	direct_vm.value = int(float(contract.get_claim(refunded_claim_id)["appeal_bond"]) * ATTO)
-	contract.file_appeal(refunded_claim_id)
-	direct_vm.value = 0
+	register_appeal(contract, direct_vm, refunded_claim_id, bond_atto(contract, refunded_claim_id), direct_alice)
 
 	direct_vm.sender = direct_alice
 	contract.resolve_appeal(refunded_claim_id)

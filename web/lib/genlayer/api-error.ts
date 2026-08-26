@@ -1,5 +1,5 @@
 import "server-only";
-import { UnconfirmedSubmissionError } from "./errors";
+import { PendingTransferError, UnconfirmedSubmissionError } from "./errors";
 import { explainContractError } from "./claim-display";
 
 /**
@@ -14,6 +14,9 @@ import { explainContractError } from "./claim-display";
 export function apiErrorResponse(err: unknown): { body: Record<string, unknown>; status: number } {
   if (err instanceof UnconfirmedSubmissionError) {
     return { body: { error: err.message, txHash: err.txHash, unconfirmed: true }, status: 502 };
+  }
+  if (err instanceof PendingTransferError) {
+    return { body: { error: err.message, txHash: err.txHash, pendingTransfer: true }, status: 502 };
   }
   return {
     body: { error: explainContractError(err instanceof Error ? err.message : String(err)) },

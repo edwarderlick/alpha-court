@@ -4,7 +4,8 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAppState } from "@/lib/store";
 import { stake } from "@/lib/genlayer/actions";
-import { UnconfirmedSubmissionError } from "@/lib/genlayer/errors";
+import { PendingTransferError, UnconfirmedSubmissionError } from "@/lib/genlayer/errors";
+import { TREASURY_ADDRESS } from "@/lib/genlayer/treasury";
 import { emitPulse, hrefForKind, tabForKind } from "@/lib/market-pulse";
 import { notifyStakesChanged } from "@/lib/use-live-claim";
 import { explainContractError, isDeadlinePassed, isOnChainClaimId, stakingWindowOpen } from "@/lib/genlayer/claim-display";
@@ -44,6 +45,7 @@ export function StakeForm({
   const [status, setStatus] = useState<
     | { kind: "idle" }
     | { kind: "pending" }
+    | { kind: "waiting_transfer"; txHash: string }
     | { kind: "done"; txHash: string }
     | { kind: "error"; message: string }
     | { kind: "unconfirmed"; txHash: string }
@@ -52,6 +54,7 @@ export function StakeForm({
   const windowOpen = stakingWindowOpen(state, deadline ?? "");
   const deadlineElapsed = Boolean(deadline) && isDeadlinePassed(deadline!);
   const locked = status.kind === "unconfirmed";
+  const retryingTransfer = status.kind === "waiting_transfer";
 
   async function submit() {
     const amountNum = parseFloat(amount);
@@ -75,13 +78,13 @@ export function StakeForm({
       });
       return;
     }
+    const existing = status.kind === "waiting_transfer" ? status.txHash : undefined;
     setStatus({ kind: "pending" });
     try {
-      // A rejected MetaMask signature throws here before any transaction
-      // is ever sent -- caught below and reported as an error, never as
-      // "done" with a fabricated hash. See lib/genlayer/wallet.ts's
-      // requestAccounts/writeContract for where that rejection surfaces.
-      const { txHash } = await stake(wallet, claimId.trim(), side, amountNum);
+      // Two-step: native send to the published treasury, then a zero-value
+      // register with that tx_hash. A rejected MetaMask signature throws
+      // here before any transaction is ever sent.
+      const { txHash } = await stake(wallet, claimId.trim(), side, amountNum, existing);
       setStatus({ kind: "done", txHash });
       if (wallet.address) {
         void fetch("/api/stakes/remember", {
@@ -114,6 +117,10 @@ export function StakeForm({
       // broadcast) -- see lib/genlayer/errors.ts. Shown distinctly and
       // the form stays disabled, so a visitor can't blindly retry into a
       // real duplicate stake.
+      if (err instanceof PendingTransferError) {
+        setStatus({ kind: "waiting_transfer", txHash: err.txHash });
+        return;
+      }
       if (err instanceof UnconfirmedSubmissionError) {
         setStatus({ kind: "unconfirmed", txHash: err.txHash });
         return;
@@ -142,7 +149,7 @@ export function StakeForm({
           <div className="flex gap-2">
             <button
               onClick={() => setSide("for")}
-              disabled={locked}
+              disabled={locked || retryingTransfer}
               className={`pressable flex-1 py-3 rounded-full font-label-mono-bold text-label-mono-bold uppercase transition-colors disabled:opacity-50 ${
                 side === "for" ? "bg-secondary-fixed text-on-secondary-fixed" : "bg-surface-variant text-on-surface-variant"
               }`}
@@ -151,7 +158,7 @@ export function StakeForm({
             </button>
             <button
               onClick={() => setSide("against")}
-              disabled={locked}
+              disabled={locked || retryingTransfer}
               className={`pressable flex-1 py-3 rounded-full font-label-mono-bold text-label-mono-bold uppercase transition-colors disabled:opacity-50 ${
                 side === "against" ? "bg-dispute-red text-white" : "bg-surface-variant text-on-surface-variant"
               }`}
@@ -159,6 +166,11 @@ export function StakeForm({
               Against
             </button>
           </div>
+          <p className="font-body-md text-body-md text-on-surface-variant break-all">
+            Send this amount to the published treasury, then the contract
+            verifies the transfer by hash. The court never holds your GEN.
+            Treasury: <span className="font-mono text-on-surface">{TREASURY_ADDRESS}</span>
+          </p>
           <label className="flex flex-col gap-1">
             <span className="font-label-mono-sm text-label-mono-sm text-on-surface-variant">Amount (GEN, 1-10)</span>
             <input
@@ -167,7 +179,7 @@ export function StakeForm({
               max={10}
               step="0.1"
               value={amount}
-              disabled={locked}
+              disabled={locked || retryingTransfer}
               onChange={(e) => setAmount(e.target.value)}
               className="bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-on-surface disabled:opacity-50"
             />
@@ -179,9 +191,11 @@ export function StakeForm({
           >
             {status.kind === "pending"
               ? wallet.status === "connected"
-                ? "Confirm in wallet..."
+                ? "Confirm transfer, then register..."
                 : "Submitting..."
-              : `Stake ${side.toUpperCase()}`}
+              : status.kind === "waiting_transfer"
+                ? "Register transfer"
+                : `Stake ${side.toUpperCase()}`}
           </button>
         </>
       )}
@@ -197,6 +211,17 @@ export function StakeForm({
       {status.kind === "error" && (
         <div className="text-dispute-red font-label-mono-sm text-label-mono-sm break-all">
           Error: {status.message}
+        </div>
+      )}
+      {status.kind === "waiting_transfer" && (
+        <div className="bg-arbitration-orange/10 border border-arbitration-orange/40 rounded-lg p-4 flex flex-col gap-2">
+          <p className="text-arbitration-orange font-label-mono-sm text-label-mono-sm">
+            Transfer submitted (tx {status.txHash.slice(0, 10)}...{status.txHash.slice(-6)}) but
+            Studio has not finalized it yet. That is visibility lag, not a failed send.
+          </p>
+          <p className="font-body-md text-body-md text-on-surface-variant">
+            Do not send the GEN again. Use Register transfer once Studio can see the hash.
+          </p>
         </div>
       )}
       {status.kind === "unconfirmed" && (

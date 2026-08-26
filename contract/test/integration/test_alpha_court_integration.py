@@ -82,7 +82,7 @@ def test_price_threshold_evidence_locking_real_consensus(surf_fixture_server):
 	surf_fixture_server.set_price("ETH/USD", 2950.5)
 
 	factory = get_contract_factory("AlphaCourt")
-	contract = factory.deploy(args=["test-surf-key", surf_fixture_server.base_url])
+	contract = factory.deploy(args=["test-surf-key", "0x1111111111111111111111111111111111111111", surf_fixture_server.base_url])
 
 	# create_claim itself fetches the posting-time snapshot via real
 	# leader + real validators independently GETting the fixture server,
@@ -132,7 +132,7 @@ def test_create_claim_rejects_invalid_price(surf_fixture_server):
 	surf_fixture_server.set_price("BTC/USD", -1.0)
 
 	factory = get_contract_factory("AlphaCourt")
-	contract = factory.deploy(args=["test-surf-key", surf_fixture_server.base_url])
+	contract = factory.deploy(args=["test-surf-key", "0x1111111111111111111111111111111111111111", surf_fixture_server.base_url])
 
 	deadline = _future_deadline(seconds=60)
 	tx = contract.create_claim(args=["BTC/USD", "60000", "above", deadline]).transact()

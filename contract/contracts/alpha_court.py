@@ -542,6 +542,13 @@ ERROR_LLM = "[LLM_ERROR]"  # LLM misbehavior, always disagree
 
 ATTO = 10**18
 
+# Studio RPC used by the non-custodial deposit probe (tx 0x588197f7…,
+# FINALIZED, leader+validators agreed on the canonical {from,to,value,status}
+# of a real native send). Stakes and appeal bonds never attach GEN to this
+# contract; the user sends to `treasury` and this contract re-fetches that
+# transfer by hash.
+STUDIO_RPC = "https://studio.genlayer.com/api"
+
 # --- Surf Data API (Category B target) ---------------------------------
 # Base URL and spot-price path confirmed for real via asksurf.ai's own
 # published skill docs during Step 0. Auth pattern (Bearer $SURF_API_KEY)
@@ -853,6 +860,118 @@ class CategoryStat:
 	claim_type: str
 	win_count: u256
 	loss_count: u256
+
+
+def _as_tx_hash(raw) -> str:
+	"""Normalize a Studio tx hash.
+
+	genlayer-js / the CLI encode a 0x-prefixed 32-byte hex string as an
+	integer (proved on the first probe attempt: probe_tx received
+	5284077028… instead of the hash). Reconstruct the 0x + 64-hex form
+	from either an int or a string so callers never have to guess.
+	Empty string stays empty (optional posting stake).
+	"""
+	if raw is None:
+		return ""
+	if isinstance(raw, bool):
+		raise gl.vm.UserError(f"{ERROR_EXPECTED} tx_hash cannot be a bool")
+	if isinstance(raw, int):
+		if raw < 0:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} tx_hash integer is negative")
+		return "0x" + format(raw, "x").zfill(64)
+	text = str(raw).strip().lower()
+	if text == "" or text == "0x":
+		return ""
+	if text.startswith("0x"):
+		hexpart = text[2:]
+	else:
+		hexpart = text
+	if not hexpart or any(c not in "0123456789abcdef" for c in hexpart):
+		raise gl.vm.UserError(f"{ERROR_EXPECTED} tx_hash is not hex")
+	if len(hexpart) > 64:
+		raise gl.vm.UserError(f"{ERROR_EXPECTED} tx_hash longer than 32 bytes")
+	return "0x" + hexpart.zfill(64)
+
+
+def _normalize_tx_status(raw) -> str:
+	status = str(raw).strip().upper()
+	if status in ("7", "STATUS.FINALIZED"):
+		return "FINALIZED"
+	return status
+
+
+def _normalize_tx_value(raw) -> str:
+	if raw is None:
+		raise gl.vm.UserError(f"{ERROR_EXTERNAL} tx missing value")
+	if isinstance(raw, bool):
+		raise gl.vm.UserError(f"{ERROR_EXTERNAL} tx value is bool")
+	if isinstance(raw, int):
+		return str(raw)
+	text = str(raw).strip()
+	if text.startswith("0x") or text.startswith("0X"):
+		return str(int(text, 16))
+	if "." in text:
+		text = text.split(".", 1)[0]
+	if not text.isdigit():
+		raise gl.vm.UserError(f"{ERROR_EXTERNAL} unparseable tx value: {text}")
+	return str(int(text))
+
+
+def _canonicalize_tx(tx: dict) -> str:
+	from_addr = str(
+		tx.get("from_address") or tx.get("from") or tx.get("sender") or ""
+	).strip().lower()
+	to_addr = str(
+		tx.get("to_address") or tx.get("to") or tx.get("recipient") or ""
+	).strip().lower()
+	if not from_addr.startswith("0x") or not to_addr.startswith("0x"):
+		raise gl.vm.UserError(
+			f"{ERROR_EXTERNAL} missing from/to: from={from_addr} to={to_addr}"
+		)
+	payload = {
+		"from": from_addr,
+		"status": _normalize_tx_status(tx.get("status")),
+		"to": to_addr,
+		"value": _normalize_tx_value(tx.get("value")),
+	}
+	return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _fetch_canonical_tx(tx_hash: str) -> str:
+	"""Independent Studio RPC fetch + strict_eq. Same vehicle as the
+	passing Step-0 probe (contract 0x55F07Ac9…, tx 0x588197f7…)."""
+	body = json.dumps(
+		{
+			"jsonrpc": "2.0",
+			"id": 1,
+			"method": "eth_getTransactionByHash",
+			"params": [tx_hash],
+		}
+	).encode("utf-8")
+
+	def fetch() -> str:
+		res = gl.nondet.web.post(
+			STUDIO_RPC,
+			body=body,
+			headers={"Content-Type": "application/json"},
+		)
+		if res.status is None or res.status >= 500:
+			raise gl.vm.UserError(f"{ERROR_TRANSIENT} RPC status={res.status}")
+		if res.status >= 400:
+			raise gl.vm.UserError(f"{ERROR_EXTERNAL} RPC status={res.status}")
+		if res.body is None:
+			raise gl.vm.UserError(f"{ERROR_EXTERNAL} empty RPC body")
+		data = json.loads(res.body.decode("utf-8"))
+		if not isinstance(data, dict):
+			raise gl.vm.UserError(f"{ERROR_EXTERNAL} RPC body is not an object")
+		if "error" in data and data["error"]:
+			raise gl.vm.UserError(f"{ERROR_EXTERNAL} RPC error={data['error']}")
+		tx = data.get("result")
+		if not isinstance(tx, dict):
+			raise gl.vm.UserError(f"{ERROR_EXTERNAL} tx not found for {tx_hash}")
+		return _canonicalize_tx(tx)
+
+	return gl.eq_principle.strict_eq(fetch)
 
 
 def _handle_leader_error(leaders_res: gl.vm.Result, retry_fn) -> bool:
@@ -1444,21 +1563,87 @@ class AlphaCourt(gl.Contract):
 	category_keys: DynArray[str]
 	claim_history_keys: DynArray[str]
 
-	def __init__(self, surf_api_key: str, surf_base_url: str = SURF_BASE_URL):
+	# Published treasury EOA. Users send GEN here directly; this contract
+	# never takes custody. Appended at end of storage layout (fresh deploy).
+	treasury: Address
+	spent_tx_hashes: TreeMap[str, u256]
+
+	def __init__(self, surf_api_key: str, treasury: str, surf_base_url: str = SURF_BASE_URL):
 		# surf_base_url is configurable (not hardcoded) so this contract can
 		# point at a non-production Surf gateway (e.g. a testnet endpoint,
 		# or -- for this build's integration test only -- a local fixture
 		# server standing in for Surf, so real multi-validator consensus can
 		# be exercised without spending real Surf credits). Production
-		# deployments simply omit the argument and get the real gateway.
+		# deployments pass the real gateway (or omit and get the default)
+		# AND the published treasury EOA as the second constructor arg.
 		self.next_claim_id = u256(1)
 		self.surf_api_key = surf_api_key
 		self.surf_base_url = surf_base_url
+		t = treasury.strip()
+		if len(t) == 40:
+			t = "0x" + t
+		if not t.startswith("0x") and not t.startswith("0X"):
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} treasury must be a 0x address")
+		hexpart = t[2:]
+		if len(hexpart) != 40:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} treasury must be a 20-byte address")
+		addr = Address(bytes.fromhex(hexpart))
+		if addr == ZERO_ADDRESS:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} treasury cannot be the zero address")
+		self.treasury = addr
 
 	def _get_claim(self, claim_id: str) -> Claim:
 		if claim_id not in self.claims:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} unknown claim_id")
 		return self.claims[claim_id]
+
+	@gl.public.view
+	def get_treasury(self) -> str:
+		return self.treasury.as_hex
+
+	@gl.public.view
+	def is_spent_tx(self, tx_hash: str) -> bool:
+		return _as_tx_hash(tx_hash) in self.spent_tx_hashes
+
+	def _verify_treasury_transfer(self, tx_hash_raw) -> tuple[str, int]:
+		"""Re-fetch a native send to the treasury and check it. Does not
+		mark the hash spent -- caller does that only after the rest of the
+		action succeeds, so a late/out-of-state revert does not burn a
+		genuine transfer. Amount bounds are the caller's job so the
+		existing 1-10 GEN / exact-bond error strings stay load-bearing.
+		"""
+		tx_hash = _as_tx_hash(tx_hash_raw)
+		if tx_hash == "":
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} tx_hash is required")
+		if tx_hash in self.spent_tx_hashes:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} tx_hash already consumed")
+
+		canon = _fetch_canonical_tx(tx_hash)
+		data = json.loads(canon)
+		status = str(data.get("status", ""))
+		if status != "FINALIZED":
+			raise gl.vm.UserError(
+				f"{ERROR_EXPECTED} transfer is not FINALIZED (status={status})"
+			)
+		from_addr = str(data.get("from", "")).lower()
+		to_addr = str(data.get("to", "")).lower()
+		caller = gl.message.sender_address.as_hex.lower()
+		treasury = self.treasury.as_hex.lower()
+		if from_addr != caller:
+			raise gl.vm.UserError(
+				f"{ERROR_EXPECTED} transfer from does not match caller"
+			)
+		if to_addr != treasury:
+			raise gl.vm.UserError(
+				f"{ERROR_EXPECTED} transfer to does not match treasury"
+			)
+		amount = int(data["value"])
+		if amount <= 0:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} transfer value must be positive")
+		return tx_hash, amount
+
+	def _mark_tx_spent(self, tx_hash: str) -> None:
+		self.spent_tx_hashes[tx_hash] = u256(1)
 
 	@gl.public.view
 	def get_claim(self, claim_id: str) -> dict:
@@ -1541,6 +1726,7 @@ class AlphaCourt(gl.Contract):
 			"contested_at": claim.contested_at,
 			"second_verdict_text": claim.second_verdict_text,
 			"appeal_outcome": claim.appeal_outcome,
+			"treasury": self.treasury.as_hex,
 		}
 
 	@gl.public.view
@@ -1653,27 +1839,28 @@ class AlphaCourt(gl.Contract):
 			)
 		return claim
 
-	def _validate_posting_stake(self) -> u256:
+	def _validate_posting_stake(self, tx_hash_raw) -> tuple:
 		"""
-		Shared by create_claim and create_relative_performance_claim (Build
-		Prompt 6 factored this out rather than duplicating it): optional
-		claimant stake at posting, no separate flat fee. Zero is fine (fully
-		optional); a non-zero attached value is the poster's own stake and
-		must obey the same [1, 10] GEN bounds as any other stake. Backs the
-		claimant's own FOR side (they're asserting the claim will hold) --
-		see STAKE_SIDE_FOR's header note.
+		Optional claimant stake at posting. Empty tx_hash means no stake.
+		A non-empty hash must be a real native send to the treasury, from
+		the caller, of 1-10 GEN -- never a self-reported amount, never
+		GEN attached to this call (this contract does not take custody).
+		Returns (amount, tx_hash_to_mark) -- hash is marked spent only
+		after the claim is actually stored.
 		"""
-		posting_stake = gl.message.value
-		if posting_stake != 0:
-			if posting_stake < MIN_STAKE_ATTO:
-				raise gl.vm.UserError(
-					f"{ERROR_EXPECTED} optional posting stake must be at least 1 GEN"
-				)
-			if posting_stake > MAX_STAKE_ATTO:
-				raise gl.vm.UserError(
-					f"{ERROR_EXPECTED} optional posting stake must be at most 10 GEN"
-				)
-		return posting_stake
+		tx_hash = _as_tx_hash(tx_hash_raw)
+		if tx_hash == "":
+			return u256(0), ""
+		hash_norm, amount = self._verify_treasury_transfer(tx_hash)
+		if amount < int(MIN_STAKE_ATTO):
+			raise gl.vm.UserError(
+				f"{ERROR_EXPECTED} optional posting stake must be at least 1 GEN"
+			)
+		if amount > int(MAX_STAKE_ATTO):
+			raise gl.vm.UserError(
+				f"{ERROR_EXPECTED} optional posting stake must be at most 10 GEN"
+			)
+		return u256(amount), hash_norm
 
 	def _take_next_claim_id(self) -> str:
 		"""Shared claim_id allocation -- see _validate_posting_stake's note."""
@@ -1681,21 +1868,22 @@ class AlphaCourt(gl.Contract):
 		self.next_claim_id = u256(int(self.next_claim_id) + 1)
 		return claim_id
 
-	def _finalize_new_claim(self, claim: Claim, posting_stake: u256) -> str:
-		"""Shared tail of both create_claim and
-		create_relative_performance_claim: optional posting stake, storage
-		writes, claim_order append."""
+	def _finalize_new_claim(self, claim: Claim, posting_stake: u256, spent_hash: str = "") -> str:
+		"""Shared tail of create_*: optional posting stake, storage
+		writes, claim_order append, then consume the deposit hash."""
 		if posting_stake != 0:
 			claim = self._record_stake(
 				claim, STAKE_SIDE_FOR, gl.message.sender_address, u256(posting_stake)
 			)
 		self.claims[claim.claim_id] = claim
 		self.claim_order.append(claim.claim_id)
+		if spent_hash:
+			self._mark_tx_spent(spent_hash)
 		return claim.claim_id
 
-	@gl.public.write.payable
+	@gl.public.write
 	def create_claim(
-		self, asset: str, threshold_price: str, direction: str, deadline: str
+		self, asset: str, threshold_price: str, direction: str, deadline: str, tx_hash: str = ""
 	) -> str:
 		if direction not in DIRECTIONS:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} direction must be 'above' or 'below'")
@@ -1711,7 +1899,7 @@ class AlphaCourt(gl.Contract):
 		if threshold_value <= 0:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} threshold_price must be positive")
 
-		posting_stake = self._validate_posting_stake()
+		posting_stake, spent_hash = self._validate_posting_stake(tx_hash)
 
 		# Category B: posting-time snapshot, fetched as part of going OPEN
 		# itself (spec S2), not a separate later step. Real leader/validator
@@ -1752,11 +1940,11 @@ class AlphaCourt(gl.Contract):
 			appeal_outcome="",
 		)
 
-		return self._finalize_new_claim(claim, posting_stake)
+		return self._finalize_new_claim(claim, posting_stake, spent_hash)
 
-	@gl.public.write.payable
+	@gl.public.write
 	def create_relative_performance_claim(
-		self, asset_a: str, asset_b: str, deadline: str
+		self, asset_a: str, asset_b: str, deadline: str, tx_hash: str = ""
 	) -> str:
 		"""
 		Build Prompt 6, tasks 1+2: "asset_a will outperform asset_b" over the
@@ -1777,7 +1965,7 @@ class AlphaCourt(gl.Contract):
 		if deadline <= gl.message_raw["datetime"]:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} deadline must be in the future")
 
-		posting_stake = self._validate_posting_stake()
+		posting_stake, spent_hash = self._validate_posting_stake(tx_hash)
 
 		# Category B: BOTH assets' posting-time prices, fetched together in
 		# ONE non-det round (see header's Step 0 note on why this is
@@ -1820,11 +2008,11 @@ class AlphaCourt(gl.Contract):
 			appeal_outcome="",
 		)
 
-		return self._finalize_new_claim(claim, posting_stake)
+		return self._finalize_new_claim(claim, posting_stake, spent_hash)
 
-	@gl.public.write.payable
+	@gl.public.write
 	def create_fundamentals_claim(
-		self, asset: str, metric: str, threshold_value: str, direction: str, deadline: str
+		self, asset: str, metric: str, threshold_value: str, direction: str, deadline: str, tx_hash: str = ""
 	) -> str:
 		"""
 		Build Prompt 7, tasks 1+2: "this on-chain/DeFi metric crosses this
@@ -1865,7 +2053,7 @@ class AlphaCourt(gl.Contract):
 		# threshold_price -- a real fundamentals threshold (e.g. a NUPL
 		# claim) can legitimately be negative.
 
-		posting_stake = self._validate_posting_stake()
+		posting_stake, spent_hash = self._validate_posting_stake(tx_hash)
 
 		posting_value, posting_fetched_at = _fetch_fundamentals_with_consensus(
 			asset, metric, self.surf_api_key, self.surf_base_url
@@ -1902,17 +2090,17 @@ class AlphaCourt(gl.Contract):
 			appeal_outcome="",
 		)
 
-		return self._finalize_new_claim(claim, posting_stake)
+		return self._finalize_new_claim(claim, posting_stake, spent_hash)
 
-	@gl.public.write.payable
-	def stake_for(self, claim_id: str) -> None:
-		self._stake(claim_id, STAKE_SIDE_FOR)
+	@gl.public.write
+	def stake_for(self, claim_id: str, tx_hash: str) -> None:
+		self._stake(claim_id, STAKE_SIDE_FOR, tx_hash)
 
-	@gl.public.write.payable
-	def stake_against(self, claim_id: str) -> None:
-		self._stake(claim_id, STAKE_SIDE_AGAINST)
+	@gl.public.write
+	def stake_against(self, claim_id: str, tx_hash: str) -> None:
+		self._stake(claim_id, STAKE_SIDE_AGAINST, tx_hash)
 
-	def _stake(self, claim_id: str, side: str) -> None:
+	def _stake(self, claim_id: str, side: str, tx_hash: str) -> None:
 		"""
 		state == OPEN alone is not sufficient: OPEN only ever changes when
 		someone actually calls lock_deadline_evidence, which is
@@ -1925,6 +2113,10 @@ class AlphaCourt(gl.Contract):
 		time). Checked directly against gl.message_raw["datetime"], same
 		source and same string-lexical ISO8601 comparison
 		lock_deadline_evidence already uses for the opposite direction.
+
+		Amount is the verified native-send value (1-10 GEN), never a
+		self-reported figure and never gl.message.value -- this method is
+		not payable.
 		"""
 		claim = self._get_claim(claim_id)
 		if claim.state != ClaimState.OPEN:
@@ -1932,14 +2124,15 @@ class AlphaCourt(gl.Contract):
 		if gl.message_raw["datetime"] >= claim.deadline:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} deadline has already passed")
 
-		amount = gl.message.value
-		if amount < MIN_STAKE_ATTO:
+		hash_norm, amount = self._verify_treasury_transfer(tx_hash)
+		if amount < int(MIN_STAKE_ATTO):
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} stake must be at least 1 GEN")
-		if amount > MAX_STAKE_ATTO:
+		if amount > int(MAX_STAKE_ATTO):
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} stake must be at most 10 GEN")
 
 		claim = self._record_stake(claim, side, gl.message.sender_address, u256(amount))
 		self.claims[claim_id] = claim
+		self._mark_tx_spent(hash_norm)
 
 	@gl.public.write
 	def lock_deadline_evidence(self, claim_id: str) -> None:
@@ -2005,8 +2198,9 @@ class AlphaCourt(gl.Contract):
 		0xcd2ffa0667d24fa0… — parent ERROR, no child, GEN stuck.
 
 		Leaving this as a no-op keeps the verdict on-chain. The keeper
-		then sends native GEN (the only transfer Studionet actually
-		credits, see claim 31 manual 0x74d2d0ed…).
+		then sends native GEN from the treasury EOA (the same wallet
+		users send stakes and bonds to -- the contract itself holds
+		nothing). See claim 31 manual 0x74d2d0ed….
 		"""
 		return
 
@@ -2290,8 +2484,8 @@ class AlphaCourt(gl.Contract):
 			self._payout_for_claim(claim)
 			self._record_passport(claim, consensus_result)
 
-	@gl.public.write.payable
-	def file_appeal(self, claim_id: str) -> None:
+	@gl.public.write
+	def file_appeal(self, claim_id: str, tx_hash: str) -> None:
 		"""
 		Task 2: CONTESTED -> APPEAL_PENDING. Requires EXACTLY the stored
 		appeal_bond_atto (the simpler of the two options the build prompt
@@ -2316,8 +2510,8 @@ class AlphaCourt(gl.Contract):
 		if _appeal_window_elapsed(claim.contested_at, gl.message_raw["datetime"]):
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} appeal window has elapsed")
 
-		bond = gl.message.value
-		if bond != claim.appeal_bond_atto:
+		hash_norm, bond = self._verify_treasury_transfer(tx_hash)
+		if bond != int(claim.appeal_bond_atto):
 			raise gl.vm.UserError(
 				f"{ERROR_EXPECTED} appeal bond must be exactly the stored bond amount"
 			)
@@ -2325,6 +2519,7 @@ class AlphaCourt(gl.Contract):
 		claim.appeal_filer = gl.message.sender_address
 		claim.state = ClaimState.APPEAL_PENDING
 		self.claims[claim_id] = claim
+		self._mark_tx_spent(hash_norm)
 
 	@gl.public.write
 	def resolve_appeal(self, claim_id: str) -> None:

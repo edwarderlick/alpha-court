@@ -19,6 +19,28 @@
  * (lib/genlayer/actions.ts), so every UI component checks exactly one
  * error type regardless of which path signed.
  */
+/**
+ * Native send succeeded (or was broadcast) but Studio RPC has not yet
+ * returned the tx as FINALIZED. Not a failure — registering too early
+ * would revert with "tx not found". UI should keep the hash and retry
+ * registration, not send a second transfer.
+ */
+export class PendingTransferError extends Error {
+  readonly txHash: string;
+
+  constructor(txHash: string, cause?: unknown) {
+    const causeMessage = cause instanceof Error ? cause.message : cause ? String(cause) : "";
+    super(
+      `Your GEN transfer was submitted (tx ${txHash}) but Studio has not finalized it yet` +
+        (causeMessage ? `: ${causeMessage}` : ".") +
+        ` Wait, then register this hash — do not send the GEN again.`
+    );
+    this.name = "PendingTransferError";
+    this.txHash = txHash;
+    if (cause instanceof Error) this.cause = cause;
+  }
+}
+
 export class UnconfirmedSubmissionError extends Error {
   readonly txHash: string;
 

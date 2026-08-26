@@ -28,13 +28,15 @@ import json
 
 import pytest
 
+from test.direct.tx_helpers import mock_studio_tx, next_tx_hash, register_stake
+
 FUTURE_DEADLINE = "2999-01-01T00:00:00.000Z"
 
 ATTO = 10**18
 
 
 def deploy(direct_deploy):
-	return direct_deploy("alpha_court.py", "test-surf-key")
+	return direct_deploy("alpha_court.py", "test-surf-key", "0x1111111111111111111111111111111111111111")
 
 
 def mock_price(direct_vm, price: float):
@@ -136,9 +138,9 @@ def test_stake_for_below_minimum_reverts(direct_vm, direct_deploy, direct_alice,
 	claim_id = contract.create_claim("ETH/USD", "3000", "above", FUTURE_DEADLINE)
 
 	direct_vm.sender = direct_bob
-	direct_vm.value = int(0.5 * ATTO)  # below 1 GEN
+	mock_studio_tx(direct_vm, sender=direct_bob, value_atto=int(0.5 * ATTO))
 	with direct_vm.expect_revert("stake must be at least 1 GEN"):
-		contract.stake_for(claim_id)
+		contract.stake_for(claim_id, next_tx_hash())
 
 
 def test_stake_against_above_maximum_reverts(direct_vm, direct_deploy, direct_alice, direct_bob):
@@ -148,9 +150,9 @@ def test_stake_against_above_maximum_reverts(direct_vm, direct_deploy, direct_al
 	claim_id = contract.create_claim("ETH/USD", "3000", "above", FUTURE_DEADLINE)
 
 	direct_vm.sender = direct_bob
-	direct_vm.value = int(10.5 * ATTO)  # above 10 GEN
+	mock_studio_tx(direct_vm, sender=direct_bob, value_atto=int(10.5 * ATTO))
 	with direct_vm.expect_revert("stake must be at most 10 GEN"):
-		contract.stake_against(claim_id)
+		contract.stake_against(claim_id, next_tx_hash())
 
 
 def test_stake_for_exact_bounds_accepted(direct_vm, direct_deploy, direct_alice, direct_bob, direct_charlie):
@@ -159,13 +161,9 @@ def test_stake_for_exact_bounds_accepted(direct_vm, direct_deploy, direct_alice,
 	mock_price(direct_vm, 2950.5)
 	claim_id = contract.create_claim("ETH/USD", "3000", "above", FUTURE_DEADLINE)
 
-	direct_vm.sender = direct_bob
-	direct_vm.value = int(1 * ATTO)  # exactly the minimum
-	contract.stake_for(claim_id)
+	register_stake(contract, direct_vm, claim_id, "for", int(1 * ATTO), direct_bob)
 
-	direct_vm.sender = direct_charlie
-	direct_vm.value = int(10 * ATTO)  # exactly the maximum
-	contract.stake_for(claim_id)
+	register_stake(contract, direct_vm, claim_id, "for", int(10 * ATTO), direct_charlie)
 
 	claim = contract.get_claim(claim_id)
 	assert float(claim["stake_for_total"]) == pytest.approx(11.0, rel=1e-9)
@@ -183,11 +181,11 @@ def test_stake_rejected_after_open_closes(direct_vm, direct_deploy, direct_alice
 	force_evidence_locked(contract, claim_id, deadline_price=3100.0)
 
 	direct_vm.sender = direct_bob
-	direct_vm.value = int(2 * ATTO)
+	mock_studio_tx(direct_vm, sender=direct_bob, value_atto=int(2 * ATTO))
 	with direct_vm.expect_revert("claim is not OPEN"):
-		contract.stake_for(claim_id)
+		contract.stake_for(claim_id, next_tx_hash())
 	with direct_vm.expect_revert("claim is not OPEN"):
-		contract.stake_against(claim_id)
+		contract.stake_against(claim_id, next_tx_hash())
 
 
 def test_repeated_stakes_from_same_address_accumulate(direct_vm, direct_deploy, direct_alice, direct_bob):
@@ -196,11 +194,8 @@ def test_repeated_stakes_from_same_address_accumulate(direct_vm, direct_deploy, 
 	mock_price(direct_vm, 2950.5)
 	claim_id = contract.create_claim("ETH/USD", "3000", "above", FUTURE_DEADLINE)
 
-	direct_vm.sender = direct_bob
-	direct_vm.value = int(3 * ATTO)
-	contract.stake_for(claim_id)
-	direct_vm.value = int(4 * ATTO)
-	contract.stake_for(claim_id)
+	register_stake(contract, direct_vm, claim_id, "for", int(3 * ATTO), direct_bob)
+	register_stake(contract, direct_vm, claim_id, "for", int(4 * ATTO), direct_bob)
 
 	claim = contract.get_claim(claim_id)
 	assert float(claim["stake_for_total"]) == pytest.approx(7.0, rel=1e-9)
@@ -212,21 +207,21 @@ def test_optional_posting_stake_within_bounds(direct_vm, direct_deploy, direct_a
 	contract = deploy(direct_deploy)
 	direct_vm.sender = direct_alice
 	mock_price(direct_vm, 2950.5)
-	direct_vm.value = int(2 * ATTO)
-	claim_id = contract.create_claim("ETH/USD", "3000", "above", FUTURE_DEADLINE)
+	tx_hash = next_tx_hash()
+	mock_studio_tx(direct_vm, sender=direct_alice, value_atto=int(2 * ATTO))
+	claim_id = contract.create_claim("ETH/USD", "3000", "above", FUTURE_DEADLINE, tx_hash)
 
 	claim = contract.get_claim(claim_id)
 	assert float(claim["stake_for_total"]) == pytest.approx(2.0, rel=1e-9)
-	direct_vm.value = 0
 
 
 def test_optional_posting_stake_above_maximum_reverts(direct_vm, direct_deploy, direct_alice):
 	contract = deploy(direct_deploy)
 	direct_vm.sender = direct_alice
-	direct_vm.value = int(20 * ATTO)
+	tx_hash = next_tx_hash()
+	mock_studio_tx(direct_vm, sender=direct_alice, value_atto=int(20 * ATTO))
 	with direct_vm.expect_revert("optional posting stake must be at most 10 GEN"):
-		contract.create_claim("ETH/USD", "3000", "above", FUTURE_DEADLINE)
-	direct_vm.value = 0
+		contract.create_claim("ETH/USD", "3000", "above", FUTURE_DEADLINE, tx_hash)
 
 
 def test_zero_posting_stake_is_fine(direct_vm, direct_deploy, direct_alice):
@@ -267,18 +262,11 @@ def test_multi_staker_payout_hand_calculated(
 	mock_price(direct_vm, 2950.5)
 	claim_id = contract.create_claim("ETH/USD", "3000", "above", FUTURE_DEADLINE)
 
-	direct_vm.sender = direct_bob
-	direct_vm.value = int(2 * ATTO)
-	contract.stake_for(claim_id)
+	register_stake(contract, direct_vm, claim_id, "for", int(2 * ATTO), direct_bob)
 
-	direct_vm.sender = direct_charlie
-	direct_vm.value = int(3 * ATTO)
-	contract.stake_for(claim_id)
+	register_stake(contract, direct_vm, claim_id, "for", int(3 * ATTO), direct_charlie)
 
-	direct_vm.sender = direct_owner
-	direct_vm.value = int(4 * ATTO)
-	contract.stake_against(claim_id)
-	direct_vm.value = 0
+	register_stake(contract, direct_vm, claim_id, "against", int(4 * ATTO), direct_owner)
 
 	claim = contract.get_claim(claim_id)
 	assert float(claim["stake_for_total"]) == pytest.approx(5.0, rel=1e-9)
@@ -379,24 +367,14 @@ def test_multi_staker_payout_uneven_three_way_split(
 	mock_price(direct_vm, 2950.5)
 	claim_id = contract.create_claim("ETH/USD", "3000", "below", FUTURE_DEADLINE)
 
-	direct_vm.sender = direct_bob
-	direct_vm.value = int(1 * ATTO)
-	contract.stake_for(claim_id)
+	register_stake(contract, direct_vm, claim_id, "for", int(1 * ATTO), direct_bob)
 
-	direct_vm.sender = direct_charlie
-	direct_vm.value = int(4 * ATTO)
-	contract.stake_for(claim_id)
+	register_stake(contract, direct_vm, claim_id, "for", int(4 * ATTO), direct_charlie)
 
-	direct_vm.sender = direct_owner
-	direct_vm.value = int(5 * ATTO)
-	contract.stake_for(claim_id)
-	direct_vm.value = 0
+	register_stake(contract, direct_vm, claim_id, "for", int(5 * ATTO), direct_owner)
 
 	# Losing side (AGAINST): the claimant stakes against her own claim.
-	direct_vm.sender = direct_alice
-	direct_vm.value = int(6 * ATTO)
-	contract.stake_against(claim_id)
-	direct_vm.value = 0
+	register_stake(contract, direct_vm, claim_id, "against", int(6 * ATTO), direct_alice)
 
 	claim = contract.get_claim(claim_id)
 	assert float(claim["stake_for_total"]) == pytest.approx(10.0, rel=1e-9)
@@ -459,10 +437,7 @@ def test_no_stakers_on_winning_side_pays_out_nothing(
 	mock_price(direct_vm, 2950.5)
 	claim_id = contract.create_claim("ETH/USD", "3000", "above", FUTURE_DEADLINE)
 
-	direct_vm.sender = direct_bob
-	direct_vm.value = int(2 * ATTO)
-	contract.stake_against(claim_id)  # only AGAINST has a stake
-	direct_vm.value = 0
+	register_stake(contract, direct_vm, claim_id, "against", int(2 * ATTO), direct_bob)
 
 	force_evidence_locked(contract, claim_id, deadline_price=3500.0)  # -> HELD -> FOR wins, but FOR pool is empty
 
@@ -493,13 +468,8 @@ def test_contested_leaves_stakes_locked(direct_vm, direct_deploy, direct_alice, 
 	mock_price(direct_vm, 2950.5)
 	claim_id = contract.create_claim("ETH/USD", "3000", "above", FUTURE_DEADLINE)
 
-	direct_vm.sender = direct_bob
-	direct_vm.value = int(2 * ATTO)
-	contract.stake_for(claim_id)
-	direct_vm.sender = direct_charlie
-	direct_vm.value = int(3 * ATTO)
-	contract.stake_against(claim_id)
-	direct_vm.value = 0
+	register_stake(contract, direct_vm, claim_id, "for", int(2 * ATTO), direct_bob)
+	register_stake(contract, direct_vm, claim_id, "against", int(3 * ATTO), direct_charlie)
 
 	force_evidence_locked(contract, claim_id, deadline_price=3500.0)
 
@@ -547,10 +517,7 @@ def test_full_state_machine_with_staking(direct_vm, direct_deploy, direct_alice,
 
 	# Staking still works well after creation -- the OPEN window is real,
 	# not a brief gap before an immediate auto-lock.
-	direct_vm.sender = direct_bob
-	direct_vm.value = int(2 * ATTO)
-	contract.stake_for(claim_id)
-	direct_vm.value = 0
+	register_stake(contract, direct_vm, claim_id, "for", int(2 * ATTO), direct_bob)
 	assert float(contract.get_claim(claim_id)["stake_for_total"]) == pytest.approx(2.0, rel=1e-9)
 
 	force_evidence_locked(contract, claim_id, deadline_price=3500.0)
@@ -581,15 +548,9 @@ def test_get_stakers_for_claim_enumerates_real_stakers(
 	mock_price(direct_vm, 2950.5)
 	claim_id = contract.create_claim("ETH/USD", "3000", "above", FUTURE_DEADLINE)
 
-	direct_vm.sender = direct_bob
-	direct_vm.value = int(2 * ATTO)
-	contract.stake_for(claim_id)
-	direct_vm.value = 0
+	register_stake(contract, direct_vm, claim_id, "for", int(2 * ATTO), direct_bob)
 
-	direct_vm.sender = direct_charlie
-	direct_vm.value = int(3 * ATTO)
-	contract.stake_against(claim_id)
-	direct_vm.value = 0
+	register_stake(contract, direct_vm, claim_id, "against", int(3 * ATTO), direct_charlie)
 
 	stakers = contract.get_stakers_for_claim(claim_id)
 	by_addr = {s["address"].lower(): s for s in stakers}
@@ -624,15 +585,9 @@ def test_get_stakers_for_claim_does_not_leak_other_claims(
 	claim_a = contract.create_claim("ETH/USD", "3000", "above", FUTURE_DEADLINE)
 	claim_b = contract.create_claim("ETH/USD", "3000", "above", FUTURE_DEADLINE)
 
-	direct_vm.sender = direct_bob
-	direct_vm.value = int(2 * ATTO)
-	contract.stake_for(claim_a)
-	direct_vm.value = 0
+	register_stake(contract, direct_vm, claim_a, "for", int(2 * ATTO), direct_bob)
 
-	direct_vm.sender = direct_charlie
-	direct_vm.value = int(3 * ATTO)
-	contract.stake_for(claim_b)
-	direct_vm.value = 0
+	register_stake(contract, direct_vm, claim_b, "for", int(3 * ATTO), direct_charlie)
 
 	stakers_a = contract.get_stakers_for_claim(claim_a)
 	stakers_b = contract.get_stakers_for_claim(claim_b)

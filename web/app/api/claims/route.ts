@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readOneClaim, depositThenWrite } from "@/lib/genlayer/client";
 import { genFloatToAtto } from "@/lib/genlayer/atto";
-import { getAllClaimsSafe } from "@/lib/genlayer/claims";
 import { bookAll, bookUpsert } from "@/lib/genlayer/book";
 import { apiErrorResponse } from "@/lib/genlayer/api-error";
 import { extractClaimId } from "@/lib/genlayer/receipt";
@@ -9,8 +8,8 @@ import { isOnChainClaimId, type ClaimSummary } from "@/lib/genlayer/claim-displa
 import { withDeadline } from "@/lib/genlayer/rpc-retry";
 
 /**
- * GET  -> list every claim on the deployed contract (Category A-style cheap
- *         display read: list_claims() + get_claim() per id, real data only).
+ * GET  -> list claims from the Redis book. A full list_claims + get_claim
+ *         fan-out from Vercel Hobby still dies with an empty 502.
  * POST -> create a claim of any of the three types, keyed by body.claimType.
  *         Build Prompt 10 extends Build Prompt 9's Price Threshold-only
  *         create here rather than adding parallel routes/patterns -- all
@@ -25,17 +24,16 @@ export const maxDuration = 10;
 export async function GET() {
   const started = Date.now();
   try {
-    let booked: Awaited<ReturnType<typeof bookAll>> = [];
-    try {
-      booked = await withDeadline(bookAll(), 1500, "bookAll");
-    } catch {
-      /* Redis miss must not skip a short Studio attempt */
-    }
-    if (booked.length > 0) {
-      return NextResponse.json({ claims: booked, cached: true });
-    }
-    const claims = await withDeadline(getAllClaimsSafe(), 4000, "list_claims");
-    return NextResponse.json({ claims });
+    // Do not fan out list_claims + get_claim from Vercel Hobby. That
+    // path still dies with an empty 502 (~8s) even inside withDeadline —
+    // the hanging Studio sockets eat the isolate before JSON is written.
+    // One-id reads and the keeper fill the book; serve that.
+    const booked = await withDeadline(bookAll(), 1500, "bookAll");
+    return NextResponse.json({
+      claims: booked,
+      cached: true,
+      ms: Date.now() - started,
+    });
   } catch (err) {
     const { body, status } = apiErrorResponse(err);
     return NextResponse.json(

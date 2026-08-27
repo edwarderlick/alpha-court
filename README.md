@@ -23,7 +23,7 @@ Alpha Court is a prediction-market court. A claim is a timed, staked question ab
 - **Three claim types today:** a price crossing a threshold, one asset outperforming another, or an on-chain/DeFi metric crossing a threshold.
 - **Payouts on Studionet are contract-initiated.** `resolve_verdict` calls `_pay_native`, which `emit_transfer`s to the winner. Real live proof: claim #1 on `0x0312c04c…`, resolve `0x7473f85d…`, child `0x525cab65…` credited 2 GEN to wallet B (38 → 40 GEN). A second `retry_payout` rolls back (`claim already paid`); B's balance stays 40 GEN. No keeper send in that payout. The keeper still exists to *call* lock/resolve/expire on a clock.
 
-Jump to: [Critical platform reality](#critical-platform-reality) · [What Alpha Court is](#what-alpha-court-is) · [Architecture](#architecture) · [Local development](#local-development) · [Honesty and known limits](#honesty-and-known-limits) · [Roadmap](#roadmap--not-yet-built)
+Jump to: [How money moves on Studionet](#how-money-moves-on-studionet) · [What Alpha Court is](#what-alpha-court-is) · [Architecture](#architecture) · [Local development](#local-development) · [Honesty and known limits](#honesty-and-known-limits) · [Roadmap](#roadmap--not-yet-built)
 
 ---
 
@@ -348,7 +348,7 @@ Ready for GenLayer review.
 - **More claim types and market categories.** Today's three types (price threshold, relative performance, fundamentals) are all crypto-price-shaped. The claim/verdict machinery underneath is general — a sports result, a macro print, a real-world event, or a poll outcome fits the same OPEN → EVIDENCE_LOCKED → RESOLVED shape with a different evidence source.
 - **Deeper gamification.** The app already has avatars, win/create fanfare, and a kinetic landing page. Natural next steps: staking/winning streaks, account levels, a leaderboard with real depth (categories, time windows, head-to-head records) instead of a single ranking, seasonal or themed dockets, and badges tied to real on-chain history via the Passport.
 - **Richer prediction-market mechanics.** The current payout formula is a flat proportional split of the losing pool. As the product matures: dynamic pricing/odds as stakes come in, deeper liquidity mechanics, and market discovery (search, filters, trending dockets) instead of a single chronological list.
-- **Removing the keeper dependency.** The keeper exists because Studio can't do a contract-initiated native transfer to a wallet yet (see "Critical platform reality" above). If that platform limit is ever lifted, payouts could become genuinely trustless end-to-end instead of contract-decides-keeper-sends.
+- **Removing the keeper's triggering role.** Payouts are already contract-initiated (`_pay_native`/`emit_transfer`, see "How money moves on Studionet" above) — that was never actually blocked on a platform limit, it was a type-handling bug, and it's fixed. What's still true: `lock_deadline_evidence` / `resolve_verdict` / `expire_appeal` / `resolve_appeal` are permissionless but not automatic, so *something* has to call them on a clock — today that's the GitHub Actions keeper. Removing that would mean a fully self-triggering contract (e.g. validator-initiated ticks, or a public incentive for anyone to call these on time), not a payout-authority change.
 - **Broader community/governance input** on which claim categories get curated or featured, rather than a single operator's judgment call.
 
 ---

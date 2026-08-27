@@ -270,4 +270,20 @@ describe("production keeper wiring", () => {
     assert.match(src, /contested_at:\s*c\.contested_at/);
     assert.match(src, /creditRefunds:\s*creditRefundedStakers/);
   });
+
+  it("exported credit functions are no-ops so a fabricated cache row cannot send GEN", () => {
+    const src = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "keeper-credits.ts"),
+      "utf8"
+    );
+    assert.match(
+      src,
+      /export async function creditResolvedWinners\([\s\S]*?\{[\s\S]*?return \[\];[\s\S]*?\}/
+    );
+    assert.match(
+      src,
+      /export async function creditRefundedStakers\([\s\S]*?\{[\s\S]*?return \[\];[\s\S]*?\}/
+    );
+    assert.match(src, /would double-pay/);
+  });
 });

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { readOneClaim, depositThenWrite } from "@/lib/genlayer/client";
 import { genFloatToAtto } from "@/lib/genlayer/atto";
 import { bookAll, bookUpsert } from "@/lib/genlayer/book";
+import { getLastRedisError } from "@/lib/persist";
 import { apiErrorResponse } from "@/lib/genlayer/api-error";
 import { extractClaimId } from "@/lib/genlayer/receipt";
 import { isOnChainClaimId, type ClaimSummary } from "@/lib/genlayer/claim-display";
@@ -29,6 +30,26 @@ export async function GET() {
     // the hanging Studio sockets eat the isolate before JSON is written.
     // One-id reads and the keeper fill the book; serve that.
     const booked = await withDeadline(bookAll(), 1500, "bookAll");
+    // bookAll() swallows a dead-Redis hashLoad failure and returns []
+    // rather than throwing (many other pages read through the same
+    // hashLoad and must not 500 over a cache outage). That means an
+    // empty array here is ambiguous: genuinely no claims, or the book is
+    // unreachable. getLastRedisError() disambiguates it -- set only when
+    // the load itself failed, cleared on the next success. A real outage
+    // now reports as a real outage instead of a silently empty market.
+    const redisError = getLastRedisError();
+    if (booked.length === 0 && redisError) {
+      return NextResponse.json(
+        {
+          claims: [],
+          cached: false,
+          degraded: true,
+          error: `claims book unavailable: ${redisError}`,
+          ms: Date.now() - started,
+        },
+        { status: 503 }
+      );
+    }
     return NextResponse.json({
       claims: booked,
       cached: true,

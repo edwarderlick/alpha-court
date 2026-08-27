@@ -17,6 +17,24 @@ export type StorageKind = "redis" | "disk" | "memory";
 
 export type HashName = "claims" | "payouts" | "stakes" | "passports";
 
+/**
+ * Last real hashLoad failure, if any. hashLoad itself still returns `{}`
+ * on failure (many pages -- passport, stakes, cases/[id] -- read through
+ * it and a hard throw there would turn a cache outage into a 500 on
+ * every one of them, not just the route this was diagnosed from). What
+ * changed: the failure is no longer swallowed silently. It's logged with
+ * the real error, and callers that need to tell "genuinely empty" apart
+ * from "storage unreachable" (GET /api/claims is the one that actually
+ * needs this) can check getLastRedisError() right after the call that
+ * returned `{}` and answer honestly instead of pretending Markets is
+ * empty. Cleared on the next successful call.
+ */
+let lastRedisError: string | null = null;
+
+export function getLastRedisError(): string | null {
+  return lastRedisError;
+}
+
 const REDIS_HASH: Record<HashName, string> = {
   claims: "ac:claims",
   payouts: "ac:payouts",
@@ -63,6 +81,30 @@ export function storageKind(): StorageKind {
   if (redisEnv()) return "redis";
   if (process.env.VERCEL) return "memory";
   return "disk";
+}
+
+/**
+ * storageKind() only checks that UPSTASH_REDIS_REST_URL/TOKEN are SET --
+ * it reports "redis" whether or not that host actually answers. That's
+ * exactly the gap that let this project's own credit-lock safety check
+ * (unsafeSignerWithoutRedis, keeper-safety.ts) stay satisfied with a real
+ * signer key configured while the URL pointed at an expired, unresolvable
+ * Upstash instance: every real op inside the tick was silently failing,
+ * but the guard that exists specifically to refuse an unsafe keeper run
+ * never fired, because it only asks "is a URL configured," not "does it
+ * work." This is a real network round trip (a GET on a throwaway key,
+ * not a write) so callers should use it sparingly -- once per keeper
+ * run, not per request.
+ */
+export async function redisReachable(): Promise<{ ok: boolean; error: string | null }> {
+  const r = getRedis();
+  if (!r) return { ok: false, error: "not configured" };
+  try {
+    await r.get("ac:health-check");
+    return { ok: true, error: null };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 type Mem = {
@@ -226,11 +268,22 @@ export async function hashLoad(name: HashName): Promise<Record<string, string>> 
       const raw = await Promise.race([
         r.hgetall<Record<string, unknown>>(REDIS_HASH[name]),
         new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error("redis hashLoad timed out")), 1000);
+          timer = setTimeout(() => reject(new Error("redis hashLoad timed out after 1000ms")), 1000);
         }),
       ]);
+      lastRedisError = null;
       return parseHash(raw);
-    } catch {
+    } catch (err) {
+      // The old version of this catch returned {} with no trace of why --
+      // a dead Redis and a genuinely empty hash were indistinguishable,
+      // and GET /api/claims reported "cached":true over an outage. Log
+      // the real cause and remember it so a caller that cares (the claims
+      // route) can tell the difference; every other page keeps working
+      // off {} exactly as before -- a cache outage degrading every read
+      // path to a hard 500 would be worse than what shipped.
+      const detail = err instanceof Error ? err.message : String(err);
+      lastRedisError = `hashLoad(${name}) failed: ${detail}`;
+      console.error(`[persist] ${lastRedisError}`);
       return {};
     } finally {
       if (timer) clearTimeout(timer);
@@ -318,6 +371,71 @@ export async function metaSet(refreshedAt: number): Promise<void> {
   if (storageKind() === "disk") {
     const fields = await hashLoad("claims");
     toDisk("claims", fields, refreshedAt);
+  }
+}
+
+const LAST_TICK_KEY = "ac:last-tick";
+let memLastTick: string | null = null;
+
+/**
+ * Last keeper tick result, shared across whichever process asks --
+ * the Next.js API route AND the GitHub Actions keeper loop write here.
+ * Replaces an in-memory `let lastTick` that lived inside one Vercel
+ * isolate: every isolate starts cold with its own copy, so
+ * GET /api/keeper/tick read `null` almost always regardless of whether
+ * the real keeper (GitHub Actions, not Vercel) was healthy -- a false
+ * "keeper looks dead" signal on a keeper that was ticking fine. This
+ * uses the same Redis (or disk/mem fallback) the book already uses, so
+ * it's real across isolates and across the two processes that actually
+ * run ticks.
+ */
+export async function keeperTickSet(value: unknown): Promise<void> {
+  const encoded = JSON.stringify(value);
+  const r = getRedis();
+  if (r) {
+    try {
+      await r.set(LAST_TICK_KEY, encoded);
+      return;
+    } catch (err) {
+      console.error(
+        `[persist] keeperTickSet failed (in-memory only for this isolate): ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+      // Fall through to the in-process copy so a dead Redis doesn't also
+      // erase the one signal an operator watching *this* isolate has.
+    }
+  }
+  memLastTick = encoded;
+}
+
+export async function keeperTickGet<T>(): Promise<T | null> {
+  const r = getRedis();
+  if (r) {
+    try {
+      const raw = await r.get<T | string>(LAST_TICK_KEY);
+      if (raw == null) return null;
+      if (typeof raw === "string") {
+        try {
+          return JSON.parse(raw) as T;
+        } catch {
+          return null;
+        }
+      }
+      return raw;
+    } catch (err) {
+      console.error(
+        `[persist] keeperTickGet failed: ${err instanceof Error ? err.message : String(err)}`
+      );
+      // Fall through to whatever this isolate has locally rather than
+      // reporting "no keeper info" over a storage blip.
+    }
+  }
+  if (!memLastTick) return null;
+  try {
+    return JSON.parse(memLastTick) as T;
+  } catch {
+    return null;
   }
 }
 

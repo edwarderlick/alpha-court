@@ -14,7 +14,7 @@ import "server-only";
 import { isOnChainClaimId, type ClaimSummary } from "./claim-display";
 import { writeAsKeeper, readClaimRaw } from "./client";
 import { studioCanRead, studioCanWrite } from "./studio-gate";
-import { storageKind } from "../persist";
+import { storageKind, keeperTickGet, keeperTickSet } from "../persist";
 import { unsafeSignerWithoutRedis } from "./keeper-safety";
 import { bookGet, bookUpsert } from "./book";
 import { indexTriggeredTransfers, reclassifyUnverifiedPayouts } from "./payouts";
@@ -32,6 +32,18 @@ export type { KeeperTickResult };
 let running = false;
 let timer: ReturnType<typeof setInterval> | null = null;
 let lastTick: KeeperTickResult | null = null;
+
+/** Records the tick both in-process (cheap, same-isolate) and in the
+ * shared store (real across isolates and across the Vercel/GitHub Actions
+ * split) -- see persist/index.ts's keeperTickSet docstring. */
+async function recordTick(result: KeeperTickResult): Promise<void> {
+  lastTick = result;
+  try {
+    await keeperTickSet(result);
+  } catch (err) {
+    console.error("[keeper] failed to persist last tick", err);
+  }
+}
 
 async function refreshBook(id: string, fallbackState: string) {
   try {
@@ -132,7 +144,7 @@ export async function runKeeperTick(): Promise<KeeperTickResult> {
 
   if (!keeperEnabled()) {
     result.skipped.push("keeper disabled");
-    lastTick = result;
+    await recordTick(result);
     return result;
   }
 
@@ -143,13 +155,13 @@ export async function runKeeperTick(): Promise<KeeperTickResult> {
   if (unsafeReason) {
     console.error(`[keeper] ${unsafeReason}`);
     result.skipped.push(unsafeReason);
-    lastTick = result;
+    await recordTick(result);
     return result;
   }
 
   if (running) {
     result.skipped.push("previous tick still running");
-    lastTick = result;
+    await recordTick(result);
     return result;
   }
 
@@ -178,15 +190,16 @@ export async function runKeeperTick(): Promise<KeeperTickResult> {
     }, result);
   } finally {
     running = false;
-    lastTick = result;
+    await recordTick(result);
   }
 
   console.log("[keeper] tick", JSON.stringify(result));
   return result;
 }
 
-export function getLastKeeperTick(): KeeperTickResult | null {
-  return lastTick;
+export async function getLastKeeperTick(): Promise<KeeperTickResult | null> {
+  const persisted = await keeperTickGet<KeeperTickResult>();
+  return persisted ?? lastTick;
 }
 
 export function startKeeper(): void {

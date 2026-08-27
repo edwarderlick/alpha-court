@@ -24,7 +24,20 @@ export async function getAllClaims(): Promise<ClaimSummary[]> {
     const ids = (await readClaim("list_claims")) as string[];
     const claims = await mapPool(ids, 2, (id) => readClaim("get_claim", [id]) as Promise<ClaimSummary>);
     const newestFirst = claims.reverse();
-    await bookReplace(newestFirst);
+    // Write-back to the book is a courtesy, not a precondition for
+    // returning real data. This used to be one try/catch around both the
+    // chain read AND bookReplace(): a dead Redis threw out of
+    // bookReplace, the catch couldn't tell that apart from the chain
+    // read itself failing, and a *successful* direct chain read got
+    // discarded -- Markets showed "Studio cannot list the chain book
+    // right now" while Studio had just answered correctly. Real data the
+    // caller already has in hand must never be thrown away because an
+    // unrelated cache write failed.
+    try {
+      await bookReplace(newestFirst);
+    } catch (err) {
+      console.error("[claims] bookReplace failed after a successful chain read; serving live data anyway", err);
+    }
     return newestFirst;
   } catch (err) {
     studioNoteError(err, "read");

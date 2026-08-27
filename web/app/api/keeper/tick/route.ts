@@ -21,7 +21,7 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({
     enabled: keeperEnabled(),
     minClaimId: keeperMinClaimId() || null,
-    lastTick: getLastKeeperTick(),
+    lastTick: await getLastKeeperTick(),
     contract:
       process.env.ALPHA_COURT_CONTRACT_ADDRESS ||
       process.env.NEXT_PUBLIC_ALPHA_COURT_CONTRACT_ADDRESS ||

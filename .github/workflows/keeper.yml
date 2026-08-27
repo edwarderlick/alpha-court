@@ -62,9 +62,30 @@ jobs:
           KEEPER_MIN_CLAIM_ID: ${{ secrets.KEEPER_MIN_CLAIM_ID }}
           SURF_API_KEY: ${{ secrets.SURF_API_KEY }}
         run: |
+          # exit 2 from `npm run keeper` means Redis is configured but
+          # unreachable (scripts/run-keeper-tick.ts's health check) --
+          # this is exactly the class of outage that expired silently
+          # before (Upstash's demo "start-redis" instances live 3 days
+          # unless claimed). A single bad tick still can't kill a
+          # 12-minute relay -- Studio itself is flaky enough that one
+          # transient error is normal -- but real, PERSISTENT Redis
+          # downtime now fails this run for real, so it shows up as a
+          # red X in the Actions tab instead of quietly looping forever.
           end=$((SECONDS + 12*60))
+          redis_down_streak=0
           while [ "$SECONDS" -lt "$end" ]; do
-            npm run keeper || true
+            npm run keeper
+            code=$?
+            if [ "$code" -eq 2 ]; then
+              redis_down_streak=$((redis_down_streak + 1))
+              echo "::warning::keeper tick $redis_down_streak: Redis configured but unreachable"
+              if [ "$redis_down_streak" -ge 5 ]; then
+                echo "::error::Redis has been unreachable for $redis_down_streak consecutive ticks (~75s+). Failing this run so it shows up as a failed Action instead of looping silently. See the [keeper] log line above for the real error and a reprovisioning pointer."
+                exit 1
+              fi
+            else
+              redis_down_streak=0
+            fi
             sleep 15
           done
       - name: Re-dispatch to keep the relay going

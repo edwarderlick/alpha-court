@@ -10,7 +10,8 @@ const CONTRACT =
   "";
 const TREASURY =
   process.env.NEXT_PUBLIC_TREASURY_ADDRESS ||
-  "0x374D46E81973dd8797f14f586AEE94AaC27e39A3";
+  CONTRACT ||
+  "0x1b8Fc1a2B16352228f2016DB1BBbeAaBA9192B37";
 
 const nextConfig: NextConfig = {
   env: {

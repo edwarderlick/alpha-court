@@ -14,6 +14,19 @@ import re
 TEST_TREASURY = "0x1111111111111111111111111111111111111111"
 ATTO = 10**18
 
+
+def apply_native_send(vm, request) -> bytes | None:
+	"""Credit a simulated emit_transfer. Storage-Address EOA sends are
+	EthSend (the proven _ExternalRecipient path). IC-to-IC is PostMessage."""
+	msg = request.get("EthSend") or request.get("PostMessage")
+	if not msg:
+		return None
+	addr = msg["address"]
+	addr_bytes = addr.as_bytes if hasattr(addr, "as_bytes") else bytes(addr)
+	value = int(msg.get("value", 0))
+	vm._balances[addr_bytes] = vm._balances.get(addr_bytes, 0) + value
+	return b""
+
 _tx_counter = 0
 
 

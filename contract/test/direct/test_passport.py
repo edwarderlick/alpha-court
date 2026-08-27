@@ -42,13 +42,11 @@ def install_hook(direct_vm, responses: list[str]):
 	state = {"i": 0}
 
 	def hook(vm, request):
-		if "PostMessage" in request:
-			msg = request["PostMessage"]
-			addr = msg["address"]
-			addr_bytes = addr.as_bytes if hasattr(addr, "as_bytes") else bytes(addr)
-			value = int(msg.get("value", 0))
-			vm._balances[addr_bytes] = vm._balances.get(addr_bytes, 0) + value
-			return b""
+		from test.direct.tx_helpers import apply_native_send
+
+		applied = apply_native_send(vm, request)
+		if applied is not None:
+			return applied
 		if "ExecPromptTemplate" in request:
 			i = min(state["i"], len(responses) - 1)
 			state["i"] += 1

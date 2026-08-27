@@ -1,6 +1,6 @@
 # Submission notes
 
-For the steward. Product facts only. Live court on GenLayer studionet (chain `61999`): **`0x219e753176D1157bC22376e10d06e4E21E401417`**. Published treasury EOA (not a secret): **`0x374D46E81973dd8797f14f586AEE94AaC27e39A3`**. Four retired courts, all read-only legacy dockets: `0xd3cD69C30A4e899bA2D346723bffac066543cF97` (pre-payout-fix), `0x8b2fF616d26Cb9bE48f4484BD5F8E7Cdaeca7902` (pre-deterministic-outcome-cross-check), `0x22Cf7A9eA315e6EcE6C2BCBF60F0f656C39CCEE4` (pre-payout-authority/deadline-enforcement fix — see §4), and `0xF9Df5e7b7E2119FC8186f7f21Dd37E075a4aCe85` (custodial payable stakes — retired because Studio still cannot IC→EOA, so this court stopped taking custody instead; see §5).
+For the steward. Product facts only. Live court on GenLayer studionet (chain `61999`): **`0x1b8Fc1a2B16352228f2016DB1BBbeAaBA9192B37`**. Deposit address is the court itself (`treasury = SELF`). Five retired courts, all read-only legacy dockets: `0xd3cD69C30A4e899bA2D346723bffac066543cF97` (pre-payout-fix), `0x8b2fF616d26Cb9bE48f4484BD5F8E7Cdaeca7902` (pre-deterministic-outcome-cross-check), `0x22Cf7A9eA315e6EcE6C2BCBF60F0f656C39CCEE4` (pre-payout-authority/deadline-enforcement fix — see §4), `0xF9Df5e7b7E2119FC8186f7f21Dd37E075a4aCe85` (custodial payable stakes), and `0x219e753176D1157bC22376e10d06e4E21E401417` (tx-hash deposits to a shared EOA; payouts still keeper-sent).
 
 **Source/bytecode match, verified explicitly, every time:** the live address above was deployed from the exact `alpha_court.py` committed alongside this document — every safeguard described here (§1's deterministic cross-check, §4's on-chain payout enumeration and deadline checks, §5's non-custodial tx-hash deposits) is live in its real bytecode, confirmed by a real end-to-end cycle on this exact deployment, not assumed from the source file alone. Each retired address above was retired specifically because its deployed bytecode predated the fix that superseded it and could not be patched in place (contracts aren't upgradeable) — this document never describes a safeguard on an address whose real bytecode doesn't have it.
 
@@ -50,23 +50,25 @@ For the steward. Product facts only. Live court on GenLayer studionet (chain `61
 
 Validators additionally judge the verdict's *reasoning quality* via `prompt_non_comparative` (cite the real numbers, reason correctly) — that LLM-equivalence judgment is unchanged and still required; the arithmetic cross-check is additive, not a replacement. Direct-mode tests cannot exercise live multi-validator consensus. That is a testing-coverage boundary, not a design gap.
 
-## 2. Payout mechanism — Studio cannot IC→EOA
+## 2. Payout mechanism — Studionet pays from the contract
 
-**Studio limit:** an Intelligent Contract cannot send native GEN to a plain wallet. Confirmed both ways:
+The weeks-old belief that Studionet cannot IC→EOA was a type-handling bug, isolated on a throwaway contract before this bytecode was written:
 
-- `emit_transfer` to an EOA silently orphans a dead child (`Contract <eoa> not found`, `value_credited: false`).
-- Documented `EthSend` / `_EoaRecipient` errors the entire parent call, which would revert the verdict if used inside `resolve_verdict`.
+- `gl.get_contract_at(eoa).emit_transfer` is IC-to-IC and still fails (`Contract <eoa> not found`, `value_credited: false`).
+- `_ExternalRecipient(calldata_typed_Address).emit_transfer` raises `SystemError: 2 inval` (payout_probe.ping).
+- `_ExternalRecipient(Address(hex_str))` and `_ExternalRecipient(storage_Address)` both succeed. Run C (`pay_stored`, recipient read back from storage): probe `0x758CA957…`, pay `0xaa9b35c3…` SUCCESS, child `0xa72dcdae…` `value_credited: true`, recipient delta exactly `7000000000000000` atto.
 
-Sybil Court hit the same wall on `withdraw()`. This is a platform limit, not an Alpha Court-only bug.
+`_pay_native` now uses that storage-Address shape. `staker` / `appeal_filer` are storage fields, same as Run C's `self.stored`. Zero amount is a no-op, not an error.
 
-**What Alpha Court does**
+**What Alpha Court does on Studionet**
 
-- `resolve_verdict` commits cleanly. The on-contract payout step is a **no-op by design**, so a failed IC→EOA cannot roll back the verdict.
-- After consensus, a **keeper** sends native GEN as a normal wallet transfer.
-- Credit is recorded only after a real `getBalance` increase. Studio's self-reported tx status is **not** trusted (`NO_MAJORITY` / `value_credited: true` on no-op self-sends was observed in testing).
-- UI (My Stakes, fanfare, claim status) shows **Paid** only after that balance check. Otherwise: **Payout not credited on-chain**.
+- Users send GEN to the court (`treasury = SELF`). The contract verifies `{from,to,value,status}` by hash, then holds the GEN.
+- `resolve_verdict` / `resolve_appeal` / `expire_appeal` call `_pay_native`, which `emit_transfer`s from the contract.
+- The keeper still *calls* those methods on a clock. It does not send the payout GEN (`creditResolvedWinners` / `creditRefundedStakers` are observation-only).
 
-**Trust split, stated directly:** Studio cannot execute a contract-initiated native transfer to a plain wallet. The live court **no longer takes custody** (§5): `create_claim` / `stake_for` / `stake_against` / `file_appeal` are not payable. Users send GEN to the published treasury EOA; the contract re-fetches that transfer by hash and `strict_eq`-agrees on `{from, to, value, status}` before recording the stake or bond. Payouts still flow through the keeper from that same treasury, with recipient and amount derived from `get_claim` + `get_stakers_for_claim` (§4), not a cache. **The contract holds nothing. The system is not trustless end to end** — payouts still depend on the treasury/keeper wallet, because Studio still cannot push GEN out of a contract. That distinction is the whole point of §5; it is not implied away.
+**Live proof, this bytecode, no keeper send:** claim #1 on `0x1b8Fc1a2…`, `ETH/USD above 999999` → `RESOLVED BROKEN`. Wallet B staked 1 GEN against; wallet A staked 1 GEN for. Resolve `0xcf5625e1a82ba472c6f93eee7020e503a500f0b0e41304050c17faf7065a0ac1` SUCCESS. Child `0xe6c5a6d5ee4cd4f71a6f6bc9cac61b8a5ccf60bdaf8f3e41d1ca46367aacc366` to `0xcE0ae5…`, value 2 GEN, `value_credited: true`, status FINALIZED. Wallet B `getBalance` 37 → 39 GEN.
+
+**Scope:** this is Studionet (chain `61999`). Testnet Asimov/Bradbury (chain `4221`) still use the GenLayer Chain ghost-contract path the official docs describe. If this project leaves Studionet, `_pay_native` has to be re-proven there. The pinned runner `py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6` is what this Studionet instance accepts; a newer runner exists upstream, and the current official faucet failed to deploy here.
 
 **Copy audit (Sybil-class):** "paid by the keeper automatically" was found to over-claim certainty and was replaced. A fabricated "3 of 5 validators agreed" line on `/how-verdicts-work` was removed (it was never real). Vague "protocol governance" bonding language was replaced with the actual CONTESTED / 48-hour window / exact stored bond.
 
@@ -74,12 +76,12 @@ Sybil Court hit the same wall on `withdraw()`. This is a platform limit, not an 
 
 | | |
 |---|---|
-| Live court | `0x219e753176D1157bC22376e10d06e4E21E401417` |
-| Published treasury | `0x374D46E81973dd8797f14f586AEE94AaC27e39A3` |
-| Retired courts | `0xd3cD69C30A4e899bA2D346723bffac066543cF97`, `0x8b2fF616d26Cb9bE48f4484BD5F8E7Cdaeca7902`, `0x22Cf7A9eA315e6EcE6C2BCBF60F0f656C39CCEE4`, `0xF9Df5e7b7E2119FC8186f7f21Dd37E075a4aCe85` |
+| Live court | `0x1b8Fc1a2B16352228f2016DB1BBbeAaBA9192B37` |
+| Deposit / treasury | the court itself (`SELF`) |
+| Retired courts | `0xd3cD69…`, `0x8b2fF616…`, `0x22Cf7A9e…`, `0xF9Df5e7b…`, `0x219e7531…` |
 | Network | studionet, chain `61999` |
-| Direct tests | **97 passed, 0 failed** (`pytest test/direct/`) |
-| Deploy tx (live court) | `0xaa7db9abcd8bbd5bb233ef0dd6ac84f00d57ea9cdd561fe609fafc82d01e2ee6` |
+| Direct tests | **99 passed, 0 failed** (`pytest test/direct/`) |
+| Deploy tx (live court) | `0xc3dfcfa72a4545c15c699036edb7fa8e7306963878e3a9045c39d5ef8976930f` |
 
 **Two full lifecycles on the live court, run end-to-end after deploy** (real txs, real ~90-second real-time wait for the deadline to actually elapse, real leader + validator consensus — not a direct-mode mock):
 
@@ -148,7 +150,7 @@ Full transcript, real claim/tx hashes in this session's record; methodology in `
 | `test_file_appeal_after_real_window_elapsed_reverts_even_though_state_is_still_contested` | A late appeal with a real, already-elapsed 48h window reverts on the timestamp check alone, `expire_appeal` never called |
 | `test_file_appeal_within_window_still_succeeds` | Sanity: a genuinely on-time appeal is unaffected |
 
-**Chosen path, then revised:** §4 kept the keeper-native-send architecture and made recipient/amount verifiable against contract state. The resubmission that stopped there was rejected: the contract still custodyed funds it could not return, and `payout` remained a no-op. §5 takes the other half of the steward's original choice — the staking design stopped custodying funds it cannot return. Keeper payouts remain, now funded by the same treasury users actually send to.
+**Chosen path, then revised twice:** §4 kept keeper-native-send and made recipient/amount verifiable against contract state. That was rejected because payout was still a no-op. §5 first stopped custodying (tx-hash deposits to an EOA). This bytecode takes the *first* half of the original choice as well: `_pay_native` actually pays, and the deposit destination is this contract (`SELF`), so the GEN the contract pays is the GEN users sent.
 
 **4c. Full audit: every real native-GEN-send path in the codebase, not just the two that caused an incident.** Two duplicate-payment incidents have now happened through two different entry points into the same underlying risk (real signer key + a persistence backend the credit lock can't see across). Rather than assume the fix above closed the whole class, every function anywhere in the repo capable of moving real GEN was found and individually checked.
 
@@ -164,16 +166,17 @@ Full transcript, real claim/tx hashes in this session's record; methodology in `
 | `web/scripts/remediate-claim-19.mjs`, `remediate-claim-31.mjs`, `remediate-unpaid-12.mjs` | Yes — direct `client.sendTransaction` calls using the signer key | **Historical one-shot artifacts, not a live path.** Each is hardcoded to one specific already-remediated claim/winner/amount from a real past incident, already run exactly once, kept only as this project's permanent evidence record (established convention throughout this session). They never touch `payoutsFor`/`recordPayout` or the credit lock at all, so there is no cross-backend ledger to disagree — the only risk is a human re-running a finished script by hand, which `unsafeSignerWithoutRedis` cannot meaningfully prevent (it guards backend disagreement, not human error) and which is out of scope for this incident class |
 | `web/scripts/stake-as.mjs` | Yes — uses the signer key to call `stake_for`/`stake_against` with real `value` | Same category as demo-signing: a contract-write stake action, not an idempotent payout, manually invoked by a human for test setup. No ledger, no applicable guard |
 | Everything else that touches `sendTransaction` in `web/scripts/` (`walkthrough-predeploy-round2.mjs`, `walkthrough-predeploy-round2b.mjs`) | No | The string `eth_sendTransaction` only appears as a mock EIP-1193 provider method name for browser-wallet-flow testing — no real send |
-| Contract itself (`_pay_native`) | No | Documented, intentional no-op — Studio cannot execute IC→EOA transfers (§2). This is *why* `sendAsKeeper` exists as the one real send path in the first place |
+| Contract itself (`_pay_native`) | Yes — `emit_transfer` from the contract's own balance, proven on this Studionet deploy | Recipients are storage Addresses reconstructed via `Address(hex)`. Keeper crediting functions no longer send. |
 
 **Result: no new unguarded path found.** The two functions fixed this round were the only ones that both (a) can send real native GEN and (b) do so through the idempotent payout ledger the two incidents both stemmed from. Every other GEN-moving function in the repo either doesn't reach `sendAsKeeper` at all, or moves GEN through a path with no "already done?" ledger to disagree about — a different, already-understood risk shape, not this one.
 
 ## Known limitations
 
-- **Keeper/treasury funding is a real ongoing dependency, stated without blurring.** The contract now holds nothing (§5). Payouts still need the published treasury EOA funded — and on this design that funding *is* the verified stakes and bonds users sent there, plus whatever the operator tops up. Studio still cannot push GEN out of a contract. Acceptable on testnet (faucet). Would need a platform-level IC→EOA capability before this could be trustless end to end.
-- **GLSim local integration tests are blocked** by an upstream tool bug ([genlayerlabs/genlayer-studio#1727](https://github.com/genlayerlabs/genlayer-studio/issues/1727)). Direct-mode tests and the live studionet deployment are independent of that. The live court is proven with on-chain txs above.
-- **Live `CONTESTED` cannot be reliably forced** on a public validator set for a demo. The appeal path is fully proven in direct-mode tests, where disagreement can be simulated deterministically (`test/direct/test_appeals.py`, 15 tests).
-- **8 tests were previously red and are now fixed, not just documented.** They asserted a contract-level native balance change after `resolve_verdict`/`resolve_appeal`/`expire_appeal` alone — stale expectations from before `_pay_native` became the documented, intentional no-op it is today. Fixed to assert the real current contract behavior (no balance moves at the contract level; the payout/refund/bond formula is still verified against real on-chain stake data) instead of silently tolerating red tests or deleting coverage.
+- **Studionet runner is pinned and stale relative to upstream.** `py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6` is what this Studionet instance accepts. genvm-lint reports a newer runner. The current official faucet failed to even deploy here. Not urgent; it is a real technical fact.
+- **IC→EOA is still a real limitation on Testnet Asimov/Bradbury (chain 4221)**, which sit on the GenLayer Chain ghost-contract path the official docs describe. This project's payout proof is Studionet-only. Moving off Studionet reopens that limitation until re-proven.
+- **Keeper still has to trigger lock/resolve/expire.** Those methods are permissionless but not automatic. The keeper no longer *funds* payouts.
+- **GLSim local integration tests are blocked** by an upstream tool bug ([genlayerlabs/genlayer-studio#1727](https://github.com/genlayerlabs/genlayer-studio/issues/1727)). Direct-mode tests and the live studionet deployment are independent of that.
+- **Live `CONTESTED` cannot be reliably forced** on a public validator set for a demo. The appeal path is fully proven in direct-mode tests (`test/direct/test_appeals.py`).
 
 ## 5. Non-custodial deposits — the missing half of the steward's request
 
@@ -183,13 +186,13 @@ Full transcript, real claim/tx hashes in this session's record; methodology in `
 
 > The requested complete settlement fix is still missing: the contract continues to custody stakes and appeal bonds while its payout function remains a no-op, so the separately funded keeper only reimburses users without releasing the funds held by the contract. Since the resubmission does not resolve the previous request, we cannot proceed with it in its current form.
 
-Sentence by sentence, on the live court `0x219e7531…`:
+Sentence by sentence, on the live court `0x1b8Fc1a2…`:
 
 | Steward sentence | What is now true |
 |---|---|
-| "Contract-held stakes and appeal bonds must either be released through a working repository-backed payout/refund path **or** the staking design must stop custodying funds it cannot return." | The second option. `create_claim`, `stake_for`, `stake_against`, and `file_appeal` are not payable. The contract's native balance is not part of the stake path. Users send GEN to the published treasury EOA `0x374D46E81973dd8797f14f586AEE94AaC27e39A3`. |
-| "the contract continues to custody stakes and appeal bonds while its payout function remains a no-op" | Payout is still a no-op inside the contract (Studio still cannot IC→EOA — that has not changed). Custody is gone: there is nothing in the contract to release. |
-| "the separately funded keeper only reimburses users without releasing the funds held by the contract" | The keeper still pays. It is no longer "separately funded" in the old sense: the treasury it pays from is the same EOA users actually sent verified stakes and bonds to. Recipient and amount are still derived from `get_claim` + `get_stakers_for_claim`, not cache (§4, unchanged). |
+| "Contract-held stakes and appeal bonds must either be released through a working repository-backed payout/refund path **or** the staking design must stop custodying funds it cannot return." | The first option, now that `_pay_native` works on Studionet. Deposits are still tx-hash verified; the destination is this contract (`SELF`), so the GEN paid out is the GEN users sent. |
+| "the contract continues to custody stakes and appeal bonds while its payout function remains a no-op" | Custody is real and so is payout. `resolve_verdict` child `0xe6c5a6d5…` credited 2 GEN to the winner. |
+| "the separately funded keeper only reimburses users without releasing the funds held by the contract" | The keeper no longer reimburses. It only triggers lock/resolve/expire. |
 | "Derive or verify every keeper recipient and amount against contract state instead of trusting the unauthenticated stake cache" | Already done in §4. Not re-done. Still true on this bytecode. |
 | "enforce the staking and appeal deadlines inside the contract methods" | Already done in §4b. Timestamp checks still run *before* the new tx-hash fetch, so a late stake does not consume a genuine transfer hash. Direct tests still pass. |
 | "Add tests showing fabricated or missing cache rows cannot change payouts and that late stakes and appeals revert." | Cache tests remain from §4. New tests in `test/direct/test_tx_verification.py` plus the live cycle below cover fabricated/mismatched hashes, replay, late stakes, and a genuine matching transfer. |
@@ -201,20 +204,20 @@ Sentence by sentence, on the live court `0x219e7531…`:
 
 That matches the independently-known fields for that send. Only then was the court rewritten.
 
-**Adversarial direct tests** (`test/direct/test_tx_verification.py`, plus the existing deadline file): fabricated/missing hash rejected; wrong recipient rejected; wrong sender rejected; amount below 1 GEN rejected; replay of a consumed hash rejected; late stake reverts on the timestamp check *without* consuming the hash; a genuine matching transfer records the real amount. Full suite: **97 passed, 0 failed**.
+**Adversarial direct tests** (`test/direct/test_tx_verification.py`, plus payout/refund balance assertions in `test_staking.py` / `test_appeals.py`): fabricated/missing hash rejected; wrong recipient rejected; wrong sender rejected; amount below 1 GEN rejected; replay of a consumed hash rejected; a hash whose canonical `to` is a retired treasury is rejected on the new court; late stake reverts on the timestamp check *without* consuming the hash; a genuine matching transfer records the real amount; multiple winners are credited the hand-calculated split; refunds and bond-return credit real balances; a zero losing-pool payout returns the stake and does not error. Full suite: **99 passed, 0 failed**.
 
-**Live cycle on this exact court** (real Studio consensus, not a mock):
+**Live cycle on this exact court** (real Studio consensus, not a mock; no `sendAsKeeper`):
 
 | Step | Result | Tx |
 |---|---|---|
-| Deploy | FINALIZED, SUCCESS, treasury `0x374D46…` | `0xaa7db9abcd8bbd5bb233ef0dd6ac84f00d57ea9cdd561fe609fafc82d01e2ee6` |
-| Create claim #1 (`ETH/USD above 999999`, no posting stake, not payable) | SUCCESS | `0xd677f0eefeb479c394ccc12604397dc64b42f96130d5c7e7044437be27c46242` |
-| Fabricated `tx_hash` (`0xabab…`) | ERROR, no stake recorded | `0xa9440ea04b440ed546e67535b9bf4a071c9d46e713f54de462c1ae300a311fc1` |
-| Native 2 GEN send wallet B → treasury | FINALIZED | `0xbbe31ec6c7b9be6b96d67bc82f1c023c0299dec2bcb04179f1851f3da4f8b3ec` |
-| `stake_against("1", that hash)`, value 0 | SUCCESS; `get_stakers_for_claim` returns B / against / 2 GEN | `0xc488ffb6fba6ee064155016ffcef6d4eecac0a87d7acb51e12ac2e047302b31a` |
-| Same hash replayed | ERROR; `is_spent_tx` true | `0x5c8cc2d262e953bc4ddc6570d813d0bcf4591a9ff498c5425e4c0421c8e64840` |
-| `lock_deadline_evidence` | SUCCESS | `0xa0f5cc95212d9a73b55aa742701a5b4dccf7f974a460949e6e8dbd146ecb64b3` |
-| `resolve_verdict` → **RESOLVED BROKEN** | SUCCESS | `0x05703dab9f00c60b7f053b6a15158c049427aea283f7ad45b9d9460675d3477a` |
-| Keeper payout, amount taken from `get_stakers_for_claim` (not cache) | FINALIZED; winner `0xcE0ae5…` 38.0 → 40.0 GEN (+2.0, exactly the recorded stake) | `0xaa117746c5e3003f40bc2e064c01d4f9fbc1aeb706dc9d36463a72a00ee6bff4` |
+| Deploy | FINALIZED, SUCCESS, treasury `SELF` = `0x1b8Fc1a2…` | `0xc3dfcfa72a4545c15c699036edb7fa8e7306963878e3a9045c39d5ef8976930f` |
+| Create claim #1 (`ETH/USD above 999999`) | SUCCESS | `0x1315ff25fda655628c9df3dd765ea5565aabf3008579cdb5037a7d42520a2ef2` |
+| Native 1 GEN A → court, `stake_for` | SUCCESS | send `0xcaa3a188…` / register `0x7281bdfb…` |
+| Native 1 GEN B → court, `stake_against` | SUCCESS | send `0x2b06e792…` / register `0x92446c62…` |
+| Same hash replayed | ERROR | `0x169ad67b…` |
+| `lock_deadline_evidence` | SUCCESS | `0x004da4c4…` |
+| `resolve_verdict` → **RESOLVED BROKEN** | SUCCESS | `0xcf5625e1a82ba472c6f93eee7020e503a500f0b0e41304050c17faf7065a0ac1` |
+| Contract `emit_transfer` child | FINALIZED, `value_credited: true`, 2 GEN to B | `0xe6c5a6d5ee4cd4f71a6f6bc9cac61b8a5ccf60bdaf8f3e41d1ca46367aacc366` |
+| Winner `getBalance` | 37 → 39 GEN (+2.0) | no keeper send |
 
-**What this still does not claim:** payouts are not a contract-initiated transfer. They cannot be, on Studio today. The honest sentence is: the contract holds nothing; the treasury/keeper wallet still has to send the GEN back.
+**What this still does not claim:** the same `emit_transfer` shape is unproven on Testnet Asimov/Bradbury (chain `4221`). The keeper is still the clock that calls lock/resolve/expire.

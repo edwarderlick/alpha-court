@@ -1,6 +1,9 @@
 /**
  * Automatic settlement. The only production path that calls
  * lock_deadline_evidence / resolve_verdict / resolve_appeal.
+ * Payouts and refunds are contract emit_transfer; the keeper does not
+ * send native GEN for those. It still has to *call* the permissionless
+ * settlement methods on a clock.
  * Emergency HTTP is POST /api/keeper/settle with Bearer KEEPER_SECRET
  * (disabled if that env is unset). No user-facing UI calls those writes
  * as the primary path — expire_appeal and resolve_appeal remain

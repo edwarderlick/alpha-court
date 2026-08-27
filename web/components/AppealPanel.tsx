@@ -176,8 +176,8 @@ export function AppealPanel({
         <div className="font-body-md text-body-md text-on-surface-variant">
           Required bond:{" "}
           <span className="text-on-surface font-bold">{shownBond ?? "—"} GEN</span> (25% of
-          pool, clamped 1-5 GEN — send this exact amount to the treasury, then register
-          the tx hash. The court never holds the bond.)
+          pool, clamped 1-5 GEN — send this exact amount to the court, then register
+          the tx hash. The contract pays it back from the same balance.)
         </div>
         <p className="font-body-md text-body-md text-on-surface-variant break-all">
           Treasury: <span className="font-mono text-on-surface">{TREASURY_ADDRESS}</span>

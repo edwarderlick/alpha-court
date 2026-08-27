@@ -81,13 +81,11 @@ def install_transfer_hook(direct_vm, verdict_text: str = "The verdict is HELD ba
 	"""
 
 	def hook(vm, request):
-		if "PostMessage" in request:
-			msg = request["PostMessage"]
-			addr = msg["address"]
-			addr_bytes = addr.as_bytes if hasattr(addr, "as_bytes") else bytes(addr)
-			value = int(msg.get("value", 0))
-			vm._balances[addr_bytes] = vm._balances.get(addr_bytes, 0) + value
-			return b""
+		from test.direct.tx_helpers import apply_native_send
+
+		applied = apply_native_send(vm, request)
+		if applied is not None:
+			return applied
 		if "ExecPromptTemplate" in request:
 			return {"ok": verdict_text}
 		return None
@@ -283,22 +281,13 @@ def test_multi_staker_payout_hand_calculated(
 	assert claim["state"] == "RESOLVED"
 	assert claim["consensus_result"] == "HELD"
 
-	# _pay_native is a documented, intentional no-op on Studionet (see its
-	# own docstring: a contract-initiated IC->EOA send either orphans a
-	# dead child or reverts the parent -- confirmed both ways against real
-	# Studio behavior). resolve_verdict computes the exact payout formula
-	# below correctly, then calls the no-op; no balance moves at the
-	# contract level by design. The keeper's native send (proven with real
-	# on-chain evidence, see SUBMISSION.md/README) is what actually pays
-	# winners -- that happens outside the contract entirely.
-	assert balance_of(direct_vm, direct_bob) == 0
-	assert balance_of(direct_vm, direct_charlie) == 0
-	assert balance_of(direct_vm, direct_owner) == 0
-
-	# The formula itself is still verified: real on-chain stakes, hand-
-	# calculated expected payout (winning_pool=5, losing_pool=4).
+	# Real PostMessage hook: emit_transfer credits the winners' balances.
 	expected_bob = 3_600_000_000_000_000_000
 	expected_charlie = 5_400_000_000_000_000_000
+	assert balance_of(direct_vm, direct_bob) == expected_bob
+	assert balance_of(direct_vm, direct_charlie) == expected_charlie
+	assert balance_of(direct_vm, direct_owner) == 0
+
 	bob_stake = int(contract.get_stake(claim_id, "for", "0x" + direct_bob.hex()))
 	charlie_stake = int(contract.get_stake(claim_id, "for", "0x" + direct_charlie.hex()))
 	winning_pool = int(float(claim["stake_for_total"]) * 10**18)
@@ -389,24 +378,17 @@ def test_multi_staker_payout_uneven_three_way_split(
 	assert claim["state"] == "RESOLVED"
 	assert claim["consensus_result"] == "HELD"
 
-	# _pay_native is a documented, intentional no-op on Studionet -- see
-	# test_multi_staker_payout_hand_calculated's comment for the full
-	# reasoning. No balance moves at the contract level by design; the
-	# keeper's native send (real on-chain evidence in SUBMISSION.md/README)
-	# is what actually pays winners.
-	assert balance_of(direct_vm, direct_bob) == 0
-	assert balance_of(direct_vm, direct_charlie) == 0
-	assert balance_of(direct_vm, direct_owner) == 0
-	assert balance_of(direct_vm, direct_alice) == 0
-
-	# The formula itself is still verified: real on-chain stakes, hand-
-	# calculated expected payout (winning_pool=10, losing_pool=6).
-	# bob:     1 + (1*6)//10 = 1 + 0.6 -> floor atto: 1e18 + (1e18*6e18)//10e18 = 1e18 + 600000000000000000 = 1_600_000_000_000_000_000
-	# charlie: 4 + (4*6)//10 = 4 + 2.4 -> 4e18 + (4e18*6e18)//10e18 = 4e18 + 2400000000000000000 = 6_400_000_000_000_000_000
-	# owner:   5 + (5*6)//10 = 5 + 3.0 -> 5e18 + (5e18*6e18)//10e18 = 5e18 + 3000000000000000000 = 8_000_000_000_000_000_000
+	# bob:     1 + (1*6)//10 = 1.6 GEN
+	# charlie: 4 + (4*6)//10 = 6.4 GEN
+	# owner:   5 + (5*6)//10 = 8.0 GEN
+	# alice (losing side): 0
 	expected_bob = 1_600_000_000_000_000_000
 	expected_charlie = 6_400_000_000_000_000_000
 	expected_owner = 8_000_000_000_000_000_000
+	assert balance_of(direct_vm, direct_bob) == expected_bob
+	assert balance_of(direct_vm, direct_charlie) == expected_charlie
+	assert balance_of(direct_vm, direct_owner) == expected_owner
+	assert balance_of(direct_vm, direct_alice) == 0
 
 	winning_pool = int(float(claim["stake_for_total"]) * 10**18)
 	losing_pool = int(float(claim["stake_against_total"]) * 10**18)
@@ -422,6 +404,24 @@ def test_multi_staker_payout_uneven_three_way_split(
 	# either, since 6/10, 24/10, 30/10 all resolve to clean atto integers.
 	total_paid = expected_bob + expected_charlie + expected_owner
 	assert total_paid == 16 * ATTO
+
+
+def test_zero_losing_pool_pays_stake_back_without_error(
+	direct_vm, direct_deploy, direct_alice, direct_bob
+):
+	"""Only the winning side staked. Losing pool is 0, so payout equals
+	each winner's own stake (a zero extra share). Must not error."""
+	install_transfer_hook(direct_vm)
+	contract = deploy(direct_deploy)
+	direct_vm.sender = direct_alice
+	mock_price(direct_vm, 2950.5)
+	claim_id = contract.create_claim("ETH/USD", "3000", "above", FUTURE_DEADLINE)
+	register_stake(contract, direct_vm, claim_id, "for", int(2 * ATTO), direct_bob)
+	force_evidence_locked(contract, claim_id, deadline_price=3500.0)
+	direct_vm.sender = direct_alice
+	contract.resolve_verdict(claim_id)
+	assert contract.get_claim(claim_id)["state"] == "RESOLVED"
+	assert balance_of(direct_vm, direct_bob) == 2 * ATTO
 
 
 def test_no_stakers_on_winning_side_pays_out_nothing(

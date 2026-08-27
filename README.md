@@ -9,9 +9,9 @@
 
 **Live demo:** [alpha-court.vercel.app](https://alpha-court.vercel.app)
 
-Live Studionet court (chain `61999`): [`0x219e753176D1157bC22376e10d06e4E21E401417`](https://studio.genlayer.com)
+Live Studionet court (chain `61999`): [`0x1b8Fc1a2B16352228f2016DB1BBbeAaBA9192B37`](https://studio.genlayer.com)
 
-Published treasury EOA (stakes and bonds go here — the contract never holds GEN): [`0x374D46E81973dd8797f14f586AEE94AaC27e39A3`](https://studio.genlayer.com)
+Deposit address is the court itself (`treasury = SELF`). Users send GEN here; the contract verifies the transfer by hash and pays winners from that same balance.
 
 Alpha Court is a prediction-market court. A claim is a timed, staked question about the world. Validators freeze public evidence at the deadline and try to agree **HELD** or **BROKEN**. If they cannot agree, the claim is **CONTESTED**: a 48-hour appeal window, then a second consensus round or a refund.
 
@@ -21,30 +21,32 @@ Alpha Court is a prediction-market court. A claim is a timed, staked question ab
 
 - **The loop:** post a claim → others stake GEN for or against it → at the deadline, evidence gets frozen → GenLayer validators reach consensus on HELD or BROKEN (or the claim is CONTESTED and goes to appeal) → winners get paid.
 - **Three claim types today:** a price crossing a threshold, one asset outperforming another, or an on-chain/DeFi metric crossing a threshold.
-- **The one thing worth knowing before anything else:** GenLayer Studio can't yet send native GEN from a contract straight to a wallet, so a backend keeper does that last step, checked against a real balance increase before the UI ever says "Paid." That split is explained in full immediately below — it's a platform limit, not something papered over.
+- **Payouts on Studionet are contract-initiated.** `resolve_verdict` calls `_pay_native`, which `emit_transfer`s to the winner. Real live proof: claim #1 on `0x1b8Fc1a2…`, resolve `0xcf5625e1…`, child `0xe6c5a6d5…` credited 2 GEN to wallet B (37 → 39 GEN). No keeper send in that payout. The keeper still exists to *call* lock/resolve/expire on a clock.
 
 Jump to: [Critical platform reality](#critical-platform-reality) · [What Alpha Court is](#what-alpha-court-is) · [Architecture](#architecture) · [Local development](#local-development) · [Honesty and known limits](#honesty-and-known-limits) · [Roadmap](#roadmap--not-yet-built)
 
 ---
 
-## Critical platform reality
+## How money moves on Studionet
 
-**GenLayer Studio cannot execute a contract-initiated native transfer to a plain wallet (EOA).**
+Users send GEN to the court address. The contract re-fetches that transfer (`eth_getTransactionByHash` + `strict_eq` on `{from,to,value,status}`) and records the stake. At resolve, `_pay_native` reconstructs the recipient from a storage `Address` via `Address(hex)` — the shape proven in settle_probe Run C (`0x758CA957…` / `0xaa9b35c3…` / child `value_credited: true`) — and `emit_transfer`s from the contract's own balance. Passing a calldata-typed `Address` straight into that interface is what used to raise `SystemError: 2 inval`; that was a type-handling bug, not a Studionet platform limit.
 
-| Layer | What it does | What it does not do |
-|---|---|---|
-| Intelligent contract | Decides *who won* and *how much is owed*. Commits `RESOLVED` / `REFUNDED`. | Pay a user. `_pay_native` is a **no-op** so a verdict is not rolled back and GEN is not orphaned into a failed child (`Contract <eoa> not found`, `value_credited: false`). |
-| Keeper (Next.js) | The only thing that actually sends native GEN. | Fetch Surf or pick HELD/BROKEN. Those stay inside the contract. |
+| Layer | What it does |
+|---|---|
+| Intelligent contract | Decides who won, holds the verified deposits, and pays winners/refunds via `emit_transfer`. |
+| Keeper (Next.js) | Calls `lock_deadline_evidence` / `resolve_verdict` / `expire_appeal` / `resolve_appeal` on a clock. It does **not** send the payout GEN. |
 
-The UI says **Paid** / **Returned** only after a keeper send has **increased the wallet balance**. That split is intentional. This repo does not claim trustless or automatic *payout*.
+**This is Studionet-specific.** Testnet Asimov / Bradbury (chain `4221`) still sit on the GenLayer Chain ghost-contract path the official docs describe; IC→EOA there is a real, open limitation. If this project ever leaves Studionet, `_pay_native` has to be re-proven on that network. The pinned runner `py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6` is the one this Studionet instance accepts; genvm-lint reports a newer upstream runner. The current official faucet failed to even deploy here.
 
-**Three retired courts (do not settle on any — legacy docket, read-only):**
+**Retired courts (do not settle on any — legacy docket, read-only):**
 
 | Address | Retired because |
 |---|---|
 | `0xd3cD69C30A4e899bA2D346723bffac066543cF97` | Superseded by the second deployment below. Historical unpaid winners are a known leftover from an earlier pass; only claim 31 was made whole there. |
 | `0x8b2fF616d26Cb9bE48f4484BD5F8E7Cdaeca7902` | Source and deployed bytecode drifted apart: the deterministic outcome cross-check (`_naive_outcome`, closing a FairSplit-shaped consensus gap) was added to `alpha_court.py` after this deployment, so its live bytecode never had the fix. Its 22 settled claims are preserved through the legacy-docket merge. |
 | `0x22Cf7A9eA315e6EcE6C2BCBF60F0f656C39CCEE4` | Real steward review found two more gaps this deployment's bytecode never had the fix for: the keeper's payout decision read the Redis stake cache instead of contract state, and `stake_for`/`stake_against`/`file_appeal` enforced deadlines only via `claim.state`, not an independent timestamp check. Both fixed in `alpha_court.py` (`get_stakers_for_claim` + direct `gl.message_raw["datetime"]` checks) — see "Payout authority and deadline enforcement" below. |
+| `0xF9Df5e7b7E2119FC8186f7f21Dd37E075a4aCe85` | Custodial payable stakes, retired when the design moved to tx-hash deposits while `_pay_native` was still a no-op. |
+| `0x219e753176D1157bC22376e10d06e4E21E401417` | Tx-hash deposits to a shared EOA treasury; payouts still keeper-sent. Retired when `_pay_native` was un-stubbed and treasury rotated to the contract (`SELF`) so spent hashes cannot replay. |
 
 Contracts can't be upgraded in place, so each fix above meant a fresh deployment rather than a patch. Claim ids restart from 1 on every new deployment, so every store that looks claims up by id is keyed by `origin_contract::claim_id`, never a bare id — see `web/lib/legacy-claim-ids.ts`.
 
@@ -148,10 +150,10 @@ On a long-lived Node process (`next dev` / `next start`), the keeper also runs `
 
 | Path | Contract | Keeper |
 |---|---|---|
-| Winners | `_payout_for_claim` computes `stake + losing share`, then `_pay_native` **no-op** | `creditResolvedWinners` native-sends |
-| Stake refund | `_refund_all_stakes` exact original stake, `_pay_native` **no-op** | `creditRefundedStakers` native-sends |
-| Bond SETTLED | `_return_appeal_bond` to filer, no-op | keeper refund-kind send to filer |
-| Bond NO_AGREEMENT | `_distribute_bond_evenly` one share per unique address, no-op | keeper adds even shares after stake refunds |
+| Winners | `_payout_for_claim` then `_pay_native` `emit_transfer` | Calls `resolve_verdict`; does not send GEN |
+| Stake refund | `_refund_all_stakes` then `_pay_native` | Calls `expire_appeal` / `resolve_appeal`; does not send GEN |
+| Bond SETTLED | `_return_appeal_bond` then `_pay_native` | Same |
+| Bond NO_AGREEMENT | `_distribute_bond_evenly` then `_pay_native` | Same |
 
 **Dust / remainder.** Naive `stake + (stake × losing) // winning` can leave up to `winning_pool − 1` atto in the contract. `_allocate_losing_shares` assigns leftover atto to the **last recipient after sorting by lowercase address hex, ascending**. The even bond split uses the same rule (`bond % n` to the highest address). The leftover always goes somewhere real and is stable across runs.
 
@@ -308,9 +310,11 @@ Pushes to `main` deploy production via [`.github/workflows/deploy.yml`](./.githu
 
 ## Honesty and known limits
 
-- The contract does **not** pay users. Do not describe payouts as trustless, guaranteed, or automatic.
-- Settlement and refunds depend on a **funded keeper**. If that wallet is empty, verdicts still commit and GEN stays in the contract until a native send succeeds.
-- Studio IC→EOA `emit_transfer` children fail (`Contract <eoa> not found`). That is why `_pay_native` is a no-op.
+- On **Studionet**, the contract pays users. Do not describe Studionet payouts as keeper-reimbursed.
+- The keeper is still required to *trigger* lock/resolve/expire. It is not required to fund payouts.
+- Passing a calldata-typed `Address` into `_ExternalRecipient.emit_transfer` raises `SystemError: 2 inval`. Reconstruct via `Address(hex)` or use a storage-read Address. That bug is not "Studio cannot IC→EOA."
+- The IC→EOA limitation **is real on Testnet Asimov/Bradbury (chain 4221)**. If this project moves off Studionet, re-prove `_pay_native` there.
+- This Studionet instance pins `py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6`. A newer runner exists upstream; the official faucet failed to deploy here.
 - Retired-court unpaid winners (claims 18–19, 21, 24–30, 32–33 on `0xd3cD69…`) were **not** all auto-repaid. Claim 31 was made whole with a keeper native send.
 - There has been **no committed `REFUNDED` outcome** on either court as of the refund-path audit. The drain pass exists so a future refund cannot sit unpaid.
 - **A real payout-key collision was found and fixed.** The payouts book's "already paid?" check matched on bare `claim_id` and treated a missing `originContract` as an automatic pass. Claim ids restart from 1 on every redeploy, so an old, unrelated payout row could satisfy the check for a same-numbered claim on a different court (confirmed real: a 2026-08-20 row was silently blocking claim #19's real payout on the second deployment, created three days later). Fixed in `web/lib/genlayer/payouts.ts` — the origin check now fails closed, and existing rows are backfilled with their real origin (from the transaction's own on-chain timestamp) the first time they're read.
@@ -325,7 +329,7 @@ Adversarial passes closed:
 | Pass | Result |
 |---|---|
 | Stuck `APPEAL_PENDING` | Keeper calls `resolve_appeal`; tests force a no-click exit |
-| Refund path vs winner path | Same no-op + keeper native send; drain for human-triggered `REFUNDED` |
+| Refund path vs winner path | Both go through `_pay_native` `emit_transfer`; keeper only triggers the write |
 | Dust / FairSplit remainder | Highest address hex receives leftover atto |
 | Appeal consensus | Independent `resolve_appeal` proofs in `test_consensus_gap.py` |
 | UI honesty | Paid / Returned only after balance increase |

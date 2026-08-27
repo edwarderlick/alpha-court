@@ -100,6 +100,30 @@ def test_replayed_tx_hash_is_rejected_on_second_attempt(
 	assert int(contract.get_stake(claim_id, "for", "0x" + direct_bob.hex())) == 2 * ATTO
 
 
+def test_spent_hash_on_retired_treasury_is_rejected_on_new_court(
+	direct_vm, direct_deploy, direct_alice, direct_bob
+):
+	"""Gap 1: spent_tx_hashes is per-deployment. Direct mode cannot load
+	the same contract class twice, so this deploys one court whose
+	treasury is the new address and replays a hash whose canonical `to`
+	is the retired treasury. The `to` check is what makes rotation
+	robust — seeding hashes is unnecessary if the destination moved."""
+	retired_treasury = "0x2222222222222222222222222222222222222222"
+	contract = deploy(direct_deploy)
+	direct_vm.sender = direct_alice
+	mock_price(direct_vm, 2950.5)
+	claim_id = contract.create_claim("ETH/USD", "3000", "above", FUTURE_DEADLINE)
+	assert contract.get_treasury().lower() == TEST_TREASURY.lower()
+	spent = next_tx_hash()
+	assert contract.is_spent_tx(spent) is False
+	direct_vm.sender = direct_bob
+	mock_studio_tx(direct_vm, sender=direct_bob, value_atto=2 * ATTO, to=retired_treasury)
+	with direct_vm.expect_revert("transfer to does not match treasury"):
+		contract.stake_for(claim_id, spent)
+	assert int(contract.get_stake(claim_id, "for", "0x" + direct_bob.hex())) == 0
+	assert contract.is_spent_tx(spent) is False
+
+
 def test_genuine_matching_transfer_succeeds(
 	direct_vm, direct_deploy, direct_alice, direct_bob
 ):

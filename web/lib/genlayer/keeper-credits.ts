@@ -72,29 +72,17 @@ function posAtto(raw: string | null | undefined): bigint {
 
 
 /**
- * After resolve_verdict succeeds on Studionet, credit winners with a
- * native EOA send. Contract IC→EOA transfers do not credit here.
- *
- * The keeper paying itself is a no-op on Studionet (A→A, NO_MAJORITY,
- * balance unchanged). That path is skipped and recorded credited:false.
- * Any other send is credited:true only if getBalance actually increased.
+ * After resolve_verdict, winners are paid by the contract itself
+ * (`_pay_native` / emit_transfer). A keeper native send on top of that
+ * would double-pay. This function is observation-only: triggered
+ * children are indexed from the resolve receipt. Do not call
+ * sendAsKeeper here.
  */
 export async function creditResolvedWinners(
-  claimId: string,
-  parentTx: string
+  _claimId: string,
+  _parentTx: string
 ): Promise<PayoutTransfer[]> {
-  const unsafeReason = creditingGuardReason();
-  if (unsafeReason) {
-    console.error(`[keeper-credits] ${unsafeReason}`);
-    return [];
-  }
-  const lockName = `credit:${claimId}`;
-  if (!(await acquireLock(lockName, CREDIT_LOCK_TTL_MS))) return [];
-  try {
-    return await creditResolvedWinnersLocked(claimId, parentTx);
-  } finally {
-    await releaseLock(lockName);
-  }
+  return [];
 }
 
 async function creditResolvedWinnersLocked(
@@ -181,21 +169,10 @@ async function creditResolvedWinnersLocked(
  * forfeited bond). Same Studionet native-send path as winners.
  */
 export async function creditRefundedStakers(
-  claimId: string,
-  parentTx: string
+  _claimId: string,
+  _parentTx: string
 ): Promise<PayoutTransfer[]> {
-  const unsafeReason = creditingGuardReason();
-  if (unsafeReason) {
-    console.error(`[keeper-credits] ${unsafeReason}`);
-    return [];
-  }
-  const lockName = `credit:${claimId}`;
-  if (!(await acquireLock(lockName, CREDIT_LOCK_TTL_MS))) return [];
-  try {
-    return await creditRefundedStakersLocked(claimId, parentTx);
-  } finally {
-    await releaseLock(lockName);
-  }
+  return [];
 }
 
 async function creditRefundedStakersLocked(

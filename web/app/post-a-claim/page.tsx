@@ -516,7 +516,7 @@ function StepTwo({ claimType, onBack }: { claimType: ClaimTypeKey; onBack: () =>
             </label>
           </StepBlock>
 
-          <StepBlock n={claimType === "RELATIVE_PERFORMANCE" ? "03" : "04"} title="Your stake" hint="Optional. Skip is fine. A stake backs FOR (1-10 GEN) sent to the published treasury — the court never holds it." delay="form-rise-4">
+          <StepBlock n={claimType === "RELATIVE_PERFORMANCE" ? "03" : "04"} title="Your stake" hint="Optional. Skip is fine. A stake backs FOR (1-10 GEN) sent to the court — verified by hash, paid out by the contract." delay="form-rise-4">
             {parseFloat(postingStake) > 0 && (
               <p className="font-mono text-[11px] text-on-surface-variant break-all mb-2">
                 Treasury {TREASURY_ADDRESS}

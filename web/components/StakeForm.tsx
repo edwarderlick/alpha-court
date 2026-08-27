@@ -167,9 +167,9 @@ export function StakeForm({
             </button>
           </div>
           <p className="font-body-md text-body-md text-on-surface-variant break-all">
-            Send this amount to the published treasury, then the contract
-            verifies the transfer by hash. The court never holds your GEN.
-            Treasury: <span className="font-mono text-on-surface">{TREASURY_ADDRESS}</span>
+            Send this amount to the court. The contract verifies the
+            transfer by hash and pays winners from that same balance.
+            Deposit address: <span className="font-mono text-on-surface">{TREASURY_ADDRESS}</span>
           </p>
           <label className="flex flex-col gap-1">
             <span className="font-label-mono-sm text-label-mono-sm text-on-surface-variant">Amount (GEN, 1-10)</span>

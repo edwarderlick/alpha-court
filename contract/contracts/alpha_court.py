@@ -522,13 +522,17 @@ from dataclasses import dataclass
 
 from genlayer import *
 
-# Official EOA / chain-layer send. `gl.get_contract_at(eoa).emit_transfer`
-# is IC-to-IC: Studio finalizes those children as constructor ERROR
-# "Contract <eoa> not found" with value_credited=false (claim 31: 10 GEN
-# in 0x568be786… never arrived; winner still 858.75 GEN). Docs:
-# developers/intelligent-contracts/features/value-transfers
+# Official EOA / chain-layer send. Same interface as settle_probe.py
+# (Run C): `_ExternalRecipient(storage_Address).emit_transfer`.
+# `gl.get_contract_at(eoa).emit_transfer` is IC-to-IC and still fails
+# on Studio ("Contract <eoa> not found", value_credited=false).
+# Passing a calldata-typed Address into this interface is what produced
+# SystemError: 2 inval (payout_probe.ping 0xcd2ffa06…). Reconstruct via
+# Address(hex-str), or pass an Address that was stored and read back.
+# Probe: 0x758CA957… pay_stored 0xaa9b35c3… SUCCESS, child 0xa72dcdae…
+# value_credited true, recipient delta 7000000000000000 atto.
 @gl.evm.contract_interface
-class _EoaRecipient:
+class _ExternalRecipient:
 	class View:
 		pass
 
@@ -542,11 +546,11 @@ ERROR_LLM = "[LLM_ERROR]"  # LLM misbehavior, always disagree
 
 ATTO = 10**18
 
-# Studio RPC used by the non-custodial deposit probe (tx 0x588197f7…,
-# FINALIZED, leader+validators agreed on the canonical {from,to,value,status}
-# of a real native send). Stakes and appeal bonds never attach GEN to this
-# contract; the user sends to `treasury` and this contract re-fetches that
-# transfer by hash.
+# Studio RPC used by the deposit probe (tx 0x588197f7…, FINALIZED,
+# leader+validators agreed on the canonical {from,to,value,status} of a
+# real native send). Users send GEN to `treasury` (production: this
+# contract) and this contract re-fetches that transfer by hash, then pays
+# winners from the same balance via `_pay_native`.
 STUDIO_RPC = "https://studio.genlayer.com/api"
 
 # --- Surf Data API (Category B target) ---------------------------------
@@ -1563,8 +1567,13 @@ class AlphaCourt(gl.Contract):
 	category_keys: DynArray[str]
 	claim_history_keys: DynArray[str]
 
-	# Published treasury EOA. Users send GEN here directly; this contract
-	# never takes custody. Appended at end of storage layout (fresh deploy).
+	# Published deposit destination. Production passes "SELF" so this is
+	# the contract's own address: users send GEN here, the contract
+	# verifies the transfer by hash, and `_pay_native` pays winners from
+	# this same balance. Rotating treasury with every redeploy is the
+	# replay-scope fix (Gap 1): a hash spent against a retired court's
+	# treasury cannot satisfy `to == this.treasury` on the new one.
+	# Tests still pass a fixture treasury so Studio RPC mocks stay stable.
 	treasury: Address
 	spent_tx_hashes: TreeMap[str, u256]
 
@@ -1575,11 +1584,15 @@ class AlphaCourt(gl.Contract):
 		# server standing in for Surf, so real multi-validator consensus can
 		# be exercised without spending real Surf credits). Production
 		# deployments pass the real gateway (or omit and get the default)
-		# AND the published treasury EOA as the second constructor arg.
+		# and treasury "SELF" (this contract). Direct tests pass a fixture
+		# address so mocked Studio RPC rows stay pointed at TEST_TREASURY.
 		self.next_claim_id = u256(1)
 		self.surf_api_key = surf_api_key
 		self.surf_base_url = surf_base_url
 		t = treasury.strip()
+		if t == "" or t.upper() == "SELF":
+			self.treasury = gl.message.contract_address
+			return
 		if len(t) == 40:
 			t = "0x" + t
 		if not t.startswith("0x") and not t.startswith("0X"):
@@ -1844,7 +1857,7 @@ class AlphaCourt(gl.Contract):
 		Optional claimant stake at posting. Empty tx_hash means no stake.
 		A non-empty hash must be a real native send to the treasury, from
 		the caller, of 1-10 GEN -- never a self-reported amount, never
-		GEN attached to this call (this contract does not take custody).
+		GEN attached to this call (value is the verified native send).
 		Returns (amount, tx_hash_to_mark) -- hash is marked spent only
 		after the claim is actually stored.
 		"""
@@ -2185,24 +2198,22 @@ class AlphaCourt(gl.Contract):
 		self.claims[claim_id] = claim
 
 	def _pay_native(self, to: Address, amount: u256) -> None:
-		"""Credit a winner. On Studionet this must not send.
+		"""Credit a winner or refund recipient from this contract's balance.
 
-		`gl.get_contract_at(eoa).emit_transfer` is IC-to-IC: Studio
-		finalizes the child as constructor ERROR "Contract <eoa> not
-		found" with value_credited=false (claim 31 child 0x568be786…).
+		Proven shape (settle_probe Run C, 0x758CA957…): the recipient is
+		an Address that lived in contract storage, reconstructed with
+		`Address(hex-str)` — never a typed Address taken straight off
+		calldata (that is payout_probe.ping, SystemError: 2 inval).
+		`staker` / `appeal_filer` are storage Addresses, same as
+		`pay_stored`'s `self.stored`.
 
-		`_EoaRecipient.emit_transfer` is the documented EOA/ghost path
-		(EthSend). On Studionet there is no EVM/ghost layer, so the host
-		raises SystemError: 2 inval *during the parent*, which rolls
-		back resolve_verdict. Proved with payout_probe ping
-		0xcd2ffa0667d24fa0… — parent ERROR, no child, GEN stuck.
-
-		Leaving this as a no-op keeps the verdict on-chain. The keeper
-		then sends native GEN from the treasury EOA (the same wallet
-		users send stakes and bonds to -- the contract itself holds
-		nothing). See claim 31 manual 0x74d2d0ed….
+		Zero amount is a no-op, not an error (empty winning pool already
+		returns before this; leftover-share math can also yield 0).
 		"""
-		return
+		if int(amount) <= 0:
+			return
+		recipient = Address(to.as_hex)
+		_ExternalRecipient(recipient).emit_transfer(value=amount)
 
 	@gl.public.write
 	def retry_payout(self, claim_id: str) -> None:

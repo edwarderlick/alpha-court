@@ -225,7 +225,7 @@ export async function depositThenWrite(
   return submitWrite(getDemoClient(), functionName, [...args, transferHash], 0n);
 }
 
-/** Native GEN send from the keeper EOA. Studionet IC→EOA transfers do not credit. */
+/** Native GEN send from the keeper EOA. Settlement payouts are contract emit_transfer; this is leftover for demo deposits and operator top-ups. */
 export async function sendAsKeeper(to: Address, valueAtto: bigint) {
   if (!studioCanWrite()) {
     throw new Error("Studio is rate-limiting writes. Native payout deferred.");

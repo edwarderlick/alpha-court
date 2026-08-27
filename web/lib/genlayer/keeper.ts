@@ -108,9 +108,14 @@ export async function loadClaims(): Promise<KeeperClaim[]> {
       if (known.has(id)) continue;
       try {
         const live = (await readClaimRaw("get_claim", [id], { bypass: true })) as ClaimSummary;
-        await bookUpsert(live);
         discovered.push(toKeeperClaim(live));
         console.log(`[keeper] discovered claim #${id} via chain enumeration (book had no row)`);
+        try {
+          await bookUpsert(live);
+        } catch (err) {
+          // Redis down must not drop a real chain claim from the tick.
+          console.error(`[keeper] book upsert failed for discovered claim #${id}`, err);
+        }
       } catch (err) {
         console.error(`[keeper] failed to fetch newly-discovered claim #${id}`, err);
       }

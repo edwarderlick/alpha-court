@@ -9,7 +9,7 @@
 
 **Live demo:** [alpha-court.vercel.app](https://alpha-court.vercel.app)
 
-Live Studionet court (chain `61999`): [`0x1b8Fc1a2B16352228f2016DB1BBbeAaBA9192B37`](https://studio.genlayer.com)
+Live Studionet court (chain `61999`): [`0x0312c04cA7a5D29025f01d9487e62Fb4fe182C04`](https://studio.genlayer.com)
 
 Deposit address is the court itself (`treasury = SELF`). Users send GEN here; the contract verifies the transfer by hash and pays winners from that same balance.
 
@@ -21,7 +21,7 @@ Alpha Court is a prediction-market court. A claim is a timed, staked question ab
 
 - **The loop:** post a claim → others stake GEN for or against it → at the deadline, evidence gets frozen → GenLayer validators reach consensus on HELD or BROKEN (or the claim is CONTESTED and goes to appeal) → winners get paid.
 - **Three claim types today:** a price crossing a threshold, one asset outperforming another, or an on-chain/DeFi metric crossing a threshold.
-- **Payouts on Studionet are contract-initiated.** `resolve_verdict` calls `_pay_native`, which `emit_transfer`s to the winner. Real live proof: claim #1 on `0x1b8Fc1a2…`, resolve `0xcf5625e1…`, child `0xe6c5a6d5…` credited 2 GEN to wallet B (37 → 39 GEN). No keeper send in that payout. The keeper still exists to *call* lock/resolve/expire on a clock.
+- **Payouts on Studionet are contract-initiated.** `resolve_verdict` calls `_pay_native`, which `emit_transfer`s to the winner. Real live proof: claim #1 on `0x0312c04c…`, resolve `0x7473f85d…`, child `0x525cab65…` credited 2 GEN to wallet B (38 → 40 GEN). A second `retry_payout` rolls back (`claim already paid`); B's balance stays 40 GEN. No keeper send in that payout. The keeper still exists to *call* lock/resolve/expire on a clock.
 
 Jump to: [Critical platform reality](#critical-platform-reality) · [What Alpha Court is](#what-alpha-court-is) · [Architecture](#architecture) · [Local development](#local-development) · [Honesty and known limits](#honesty-and-known-limits) · [Roadmap](#roadmap--not-yet-built)
 
@@ -29,7 +29,7 @@ Jump to: [Critical platform reality](#critical-platform-reality) · [What Alpha 
 
 ## How money moves on Studionet
 
-Users send GEN to the court address. The contract re-fetches that transfer (`eth_getTransactionByHash` + `strict_eq` on `{from,to,value,status}`) and records the stake. At resolve, `_pay_native` reconstructs the recipient from a storage `Address` via `Address(hex)` — the shape proven in settle_probe Run C (`0x758CA957…` / `0xaa9b35c3…` / child `value_credited: true`) — and `emit_transfer`s from the contract's own balance. Passing a calldata-typed `Address` straight into that interface is what used to raise `SystemError: 2 inval`; that was a type-handling bug, not a Studionet platform limit.
+Users send GEN to the court address. The contract re-fetches that transfer (`eth_getTransactionByHash` + `strict_eq` on `{from,to,value,status}`) and records the stake. At resolve, `_pay_native` reconstructs the recipient from a storage `Address` via `Address(hex)` — the shape proven in settle_probe Run C (`0x758CA957…` / `0xaa9b35c3…` / recipient delta exactly `7000000000000000` atto) — and `emit_transfer`s from the contract's own balance. Passing a calldata-typed `Address` straight into that interface is what used to raise `SystemError: 2 inval`; that was a type-handling bug, not a Studionet platform limit.
 
 | Layer | What it does |
 |---|---|
@@ -47,6 +47,7 @@ Users send GEN to the court address. The contract re-fetches that transfer (`eth
 | `0x22Cf7A9eA315e6EcE6C2BCBF60F0f656C39CCEE4` | Real steward review found two more gaps this deployment's bytecode never had the fix for: the keeper's payout decision read the Redis stake cache instead of contract state, and `stake_for`/`stake_against`/`file_appeal` enforced deadlines only via `claim.state`, not an independent timestamp check. Both fixed in `alpha_court.py` (`get_stakers_for_claim` + direct `gl.message_raw["datetime"]` checks) — see "Payout authority and deadline enforcement" below. |
 | `0xF9Df5e7b7E2119FC8186f7f21Dd37E075a4aCe85` | Custodial payable stakes, retired when the design moved to tx-hash deposits while `_pay_native` was still a no-op. |
 | `0x219e753176D1157bC22376e10d06e4E21E401417` | Tx-hash deposits to a shared EOA treasury; payouts still keeper-sent. Retired when `_pay_native` was un-stubbed and treasury rotated to the contract (`SELF`) so spent hashes cannot replay. |
+| `0x1b8Fc1a2B16352228f2016DB1BBbeAaBA9192B37` | Contract-held payout worked, but `retry_payout` was permissionless with no `paid` flag, so a `RESOLVED` claim could be paid again from pooled deposits. |
 
 Contracts can't be upgraded in place, so each fix above meant a fresh deployment rather than a patch. Claim ids restart from 1 on every new deployment, so every store that looks claims up by id is keyed by `origin_contract::claim_id`, never a bare id — see `web/lib/legacy-claim-ids.ts`.
 
@@ -312,7 +313,8 @@ Pushes to `main` deploy production via [`.github/workflows/deploy.yml`](./.githu
 
 - On **Studionet**, the contract pays users. Do not describe Studionet payouts as keeper-reimbursed.
 - The keeper is still required to *trigger* lock/resolve/expire. It is not required to fund payouts.
-- Passing a calldata-typed `Address` into `_ExternalRecipient.emit_transfer` raises `SystemError: 2 inval`. Reconstruct via `Address(hex)` or use a storage-read Address. That bug is not "Studio cannot IC→EOA."
+- Passing a calldata-typed `Address` into `_ExternalRecipient.emit_transfer` raises `SystemError: 2 inval`. Reconstruct via `Address(hex)` or use a storage-read Address. That bug is not "Studio cannot IC→EOA." Direct-mode tests cannot see that class of bug: the harness intercepts `EthSend` and credits balances itself.
+- `retry_payout` is gated to the claim poster or the keeper and reverts `claim already paid` after a real payout. A previous court (`0x1b8Fc1a2…`) paid a `RESOLVED` claim again from pooled deposits because it had no `paid` flag.
 - The IC→EOA limitation **is real on Testnet Asimov/Bradbury (chain 4221)**. If this project moves off Studionet, re-prove `_pay_native` there.
 - This Studionet instance pins `py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6`. A newer runner exists upstream; the official faucet failed to deploy here.
 - Retired-court unpaid winners (claims 18–19, 21, 24–30, 32–33 on `0xd3cD69…`) were **not** all auto-repaid. Claim 31 was made whole with a keeper native send.

@@ -823,6 +823,12 @@ class Claim:
 	second_verdict_text: str
 	appeal_outcome: str
 
+	# Set True inside _payout_for_claim the moment a payout completes.
+	# retry_payout is permissionless-looking but re-runs this path, and
+	# RESOLVED is a resting state -- without this flag a second call
+	# re-reads the same stake totals and pays again from pooled deposits.
+	paid: bool
+
 
 @allow_storage
 @dataclass
@@ -1576,6 +1582,9 @@ class AlphaCourt(gl.Contract):
 	# Tests still pass a fixture treasury so Studio RPC mocks stay stable.
 	treasury: Address
 	spent_tx_hashes: TreeMap[str, u256]
+	# Deployer. retry_payout is gated to this address or the claim poster
+	# (defense in depth on top of Claim.paid).
+	keeper: Address
 
 	def __init__(self, surf_api_key: str, treasury: str, surf_base_url: str = SURF_BASE_URL):
 		# surf_base_url is configurable (not hardcoded) so this contract can
@@ -1589,6 +1598,7 @@ class AlphaCourt(gl.Contract):
 		self.next_claim_id = u256(1)
 		self.surf_api_key = surf_api_key
 		self.surf_base_url = surf_base_url
+		self.keeper = gl.message.sender_address
 		t = treasury.strip()
 		if t == "" or t.upper() == "SELF":
 			self.treasury = gl.message.contract_address
@@ -1613,6 +1623,17 @@ class AlphaCourt(gl.Contract):
 	@gl.public.view
 	def get_treasury(self) -> str:
 		return self.treasury.as_hex
+
+	@gl.public.view
+	def get_keeper(self) -> str:
+		return self.keeper.as_hex
+
+	@gl.public.write.payable
+	def __receive__(self) -> None:
+		# Spec-required handler for a bare native send. Studio previously
+		# credited deposits at the database layer without dispatching this;
+		# a real GenVM transfer needs the method to exist.
+		pass
 
 	@gl.public.view
 	def is_spent_tx(self, tx_hash: str) -> bool:
@@ -1739,6 +1760,7 @@ class AlphaCourt(gl.Contract):
 			"contested_at": claim.contested_at,
 			"second_verdict_text": claim.second_verdict_text,
 			"appeal_outcome": claim.appeal_outcome,
+			"paid": claim.paid,
 			"treasury": self.treasury.as_hex,
 		}
 
@@ -1951,6 +1973,7 @@ class AlphaCourt(gl.Contract):
 			contested_at="",
 			second_verdict_text="",
 			appeal_outcome="",
+			paid=False,
 		)
 
 		return self._finalize_new_claim(claim, posting_stake, spent_hash)
@@ -2019,6 +2042,7 @@ class AlphaCourt(gl.Contract):
 			contested_at="",
 			second_verdict_text="",
 			appeal_outcome="",
+			paid=False,
 		)
 
 		return self._finalize_new_claim(claim, posting_stake, spent_hash)
@@ -2101,6 +2125,7 @@ class AlphaCourt(gl.Contract):
 			contested_at="",
 			second_verdict_text="",
 			appeal_outcome="",
+			paid=False,
 		)
 
 		return self._finalize_new_claim(claim, posting_stake, spent_hash)
@@ -2217,17 +2242,24 @@ class AlphaCourt(gl.Contract):
 
 	@gl.public.write
 	def retry_payout(self, claim_id: str) -> None:
-		"""Re-run the RESOLVED payout send.
+		"""Re-run the RESOLVED payout send if it has not already completed.
 
-		Needed when a previous emit_transfer child failed to credit (Studio
-		IC-to-EOA bug). Safe vs double-pay only if that child never
-		credited — which is the failure mode this exists to repair.
+		Needed when a previous emit_transfer child failed to credit. Not
+		permissionless: only the claim poster or the keeper (deployer)
+		may call it. Not silently idempotent: a claim with paid=True is
+		rejected with a UserError, so a missing revert cannot hide a
+		regression that starts paying again.
 		"""
 		claim = self._get_claim(claim_id)
 		if claim.state != ClaimState.RESOLVED:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} claim is not RESOLVED")
 		if claim.consensus_result not in (OUTCOME_HELD, OUTCOME_BROKEN):
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} claim has no HELD/BROKEN outcome")
+		sender = gl.message.sender_address
+		if sender != claim.poster and sender != self.keeper:
+			raise gl.vm.UserError(
+				f"{ERROR_EXPECTED} only the claim poster or keeper may retry payout"
+			)
 		self._payout_for_claim(claim)
 
 	def _payout_for_claim(self, claim: Claim) -> None:
@@ -2235,10 +2267,16 @@ class AlphaCourt(gl.Contract):
 		Standard proportional-pool payout (Build Prompt 2's exact formula,
 		unmodified) -- run exactly once per claim, either as part of the
 		same resolve_verdict() call that sets state to RESOLVED, or as part
-		of resolve_appeal()'s SETTLED branch. No re-entry path exists into
-		either caller for the same claim (both are guarded by one-time
-		state transitions), so this is still safe to wire directly into the
-		settling call -- see the header note.
+		of resolve_appeal()'s SETTLED branch, or via retry_payout if that
+		first send never completed.
+
+		Claim.paid is the load-bearing guard. resolve_verdict /
+		resolve_appeal are one-time state transitions, but retry_payout
+		re-enters this function while state is still RESOLVED and the
+		stake totals are still in storage. Without paid, a second call
+		pays again from pooled deposits. The flag is set after the sends
+		in this same call and persisted immediately; a later call raises
+		rather than returning quietly.
 
 		payout = stake + (stake / winning_pool_total) * losing_pool_total
 		for every staker on the winning side; losing-side stakers get
@@ -2254,8 +2292,12 @@ class AlphaCourt(gl.Contract):
 		If nobody staked on the winning side, there is no one to pay --
 		any losing-side stakes simply remain in the contract's balance (no
 		refund mechanism is specified for this edge case; not invented
-		here).
+		here). That empty path still marks paid so retry_payout cannot
+		later succeed as a silent no-op.
 		"""
+		if claim.paid:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} claim already paid")
+
 		winning_side = STAKE_SIDE_FOR if claim.consensus_result == OUTCOME_HELD else STAKE_SIDE_AGAINST
 		winning_pool = int(
 			claim.stake_for_total_atto
@@ -2269,6 +2311,8 @@ class AlphaCourt(gl.Contract):
 		)
 
 		if winning_pool == 0:
+			claim.paid = True
+			self.claims[claim.claim_id] = claim
 			return
 
 		prefix = f"{claim.claim_id}:{winning_side}:"
@@ -2289,6 +2333,9 @@ class AlphaCourt(gl.Contract):
 			payout = u256(stake_amount + share)
 			if payout > 0:
 				self._pay_native(staker, payout)
+
+		claim.paid = True
+		self.claims[claim.claim_id] = claim
 
 	def _refund_all_stakes(self, claim: Claim) -> None:
 		"""

@@ -88,9 +88,9 @@ def mock_studio_tx(
 	)
 
 
-def register_stake(contract, direct_vm, claim_id, side, amount_atto, sender, tx_hash=None):
+def register_stake(contract, direct_vm, claim_id, side, amount_atto, sender, tx_hash=None, to: str = TEST_TREASURY):
 	tx_hash = tx_hash or next_tx_hash()
-	mock_studio_tx(direct_vm, sender=sender, value_atto=amount_atto)
+	mock_studio_tx(direct_vm, sender=sender, value_atto=amount_atto, to=to)
 	direct_vm.sender = sender
 	if side == "for":
 		contract.stake_for(claim_id, tx_hash)

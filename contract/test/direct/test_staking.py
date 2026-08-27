@@ -421,6 +421,7 @@ def test_zero_losing_pool_pays_stake_back_without_error(
 	direct_vm.sender = direct_alice
 	contract.resolve_verdict(claim_id)
 	assert contract.get_claim(claim_id)["state"] == "RESOLVED"
+	assert contract.get_claim(claim_id)["paid"] is True
 	assert balance_of(direct_vm, direct_bob) == 2 * ATTO
 
 
@@ -446,7 +447,11 @@ def test_no_stakers_on_winning_side_pays_out_nothing(
 
 	claim = contract.get_claim(claim_id)
 	assert claim["state"] == "RESOLVED"
+	assert claim["paid"] is True
 	assert balance_of(direct_vm, direct_bob) == 0  # against side: no payout, stake stays locked
+	direct_vm.sender = direct_alice
+	with direct_vm.expect_revert("claim already paid"):
+		contract.retry_payout(claim_id)
 
 
 # ---------------------------------------------------------------------

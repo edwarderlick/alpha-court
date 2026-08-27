@@ -23,6 +23,7 @@ export type ClaimSummary = {
   appeal_outcome?: string;
   appeal_bond?: string;
   appeal_filer?: string | null;
+  paid?: boolean;
 };
 
 export type ClaimTitleInput = {

@@ -209,7 +209,7 @@ export async function writeClaim(
 }
 
 /**
- * Demo path for the non-custodial deposit: send GEN to the treasury from
+ * Demo path for a contract-held deposit: send GEN to the treasury from
  * the demo signer, then register the resulting tx hash with value 0.
  */
 export async function depositThenWrite(

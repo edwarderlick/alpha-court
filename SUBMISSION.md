@@ -1,8 +1,8 @@
 # Submission notes
 
-For the steward. Product facts only. Live court on GenLayer studionet (chain `61999`): **`0x1b8Fc1a2B16352228f2016DB1BBbeAaBA9192B37`**. Deposit address is the court itself (`treasury = SELF`). Five retired courts, all read-only legacy dockets: `0xd3cD69C30A4e899bA2D346723bffac066543cF97` (pre-payout-fix), `0x8b2fF616d26Cb9bE48f4484BD5F8E7Cdaeca7902` (pre-deterministic-outcome-cross-check), `0x22Cf7A9eA315e6EcE6C2BCBF60F0f656C39CCEE4` (pre-payout-authority/deadline-enforcement fix — see §4), `0xF9Df5e7b7E2119FC8186f7f21Dd37E075a4aCe85` (custodial payable stakes), and `0x219e753176D1157bC22376e10d06e4E21E401417` (tx-hash deposits to a shared EOA; payouts still keeper-sent).
+For the steward. Product facts only. Live court on GenLayer studionet (chain `61999`): **`0x0312c04cA7a5D29025f01d9487e62Fb4fe182C04`**. Deposit address is the court itself (`treasury = SELF`). Six retired courts, all read-only legacy dockets: `0xd3cD69C30A4e899bA2D346723bffac066543cF97` (pre-payout-fix), `0x8b2fF616d26Cb9bE48f4484BD5F8E7Cdaeca7902` (pre-deterministic-outcome-cross-check), `0x22Cf7A9eA315e6EcE6C2BCBF60F0f656C39CCEE4` (pre-payout-authority/deadline-enforcement fix — see §4), `0xF9Df5e7b7E2119FC8186f7f21Dd37E075a4aCe85` (custodial payable stakes), `0x219e753176D1157bC22376e10d06e4E21E401417` (tx-hash deposits to a shared EOA; payouts still keeper-sent), and `0x1b8Fc1a2B16352228f2016DB1BBbeAaBA9192B37` (contract-held payout worked, retired because permissionless `retry_payout` could pay a `RESOLVED` claim again from pooled deposits).
 
-**Source/bytecode match, verified explicitly, every time:** the live address above was deployed from the exact `alpha_court.py` committed alongside this document — every safeguard described here (§1's deterministic cross-check, §4's on-chain payout enumeration and deadline checks, §5's non-custodial tx-hash deposits) is live in its real bytecode, confirmed by a real end-to-end cycle on this exact deployment, not assumed from the source file alone. Each retired address above was retired specifically because its deployed bytecode predated the fix that superseded it and could not be patched in place (contracts aren't upgradeable) — this document never describes a safeguard on an address whose real bytecode doesn't have it.
+**Source/bytecode match, verified explicitly, every time:** the live address above was deployed from the exact `alpha_court.py` committed alongside this document — every safeguard described here (§1's deterministic cross-check, §4's on-chain payout enumeration and deadline checks, §5's contract-held deposits with a working, once-only payout) is live in its real bytecode, confirmed by a real end-to-end cycle on this exact deployment, not assumed from the source file alone. Each retired address above was retired specifically because its deployed bytecode predated the fix that superseded it and could not be patched in place (contracts aren't upgradeable) — this document never describes a safeguard on an address whose real bytecode doesn't have it.
 
 ## Prior-art check
 
@@ -54,9 +54,9 @@ Validators additionally judge the verdict's *reasoning quality* via `prompt_non_
 
 The weeks-old belief that Studionet cannot IC→EOA was a type-handling bug, isolated on a throwaway contract before this bytecode was written:
 
-- `gl.get_contract_at(eoa).emit_transfer` is IC-to-IC and still fails (`Contract <eoa> not found`, `value_credited: false`).
+- `gl.get_contract_at(eoa).emit_transfer` is IC-to-IC and still fails (`Contract <eoa> not found`).
 - `_ExternalRecipient(calldata_typed_Address).emit_transfer` raises `SystemError: 2 inval` (payout_probe.ping).
-- `_ExternalRecipient(Address(hex_str))` and `_ExternalRecipient(storage_Address)` both succeed. Run C (`pay_stored`, recipient read back from storage): probe `0x758CA957…`, pay `0xaa9b35c3…` SUCCESS, child `0xa72dcdae…` `value_credited: true`, recipient delta exactly `7000000000000000` atto.
+- `_ExternalRecipient(Address(hex_str))` and `_ExternalRecipient(storage_Address)` both succeed. Run C (`pay_stored`, recipient read back from storage): probe `0x758CA957…`, pay `0xaa9b35c3…` SUCCESS, child `0xa72dcdae…`, recipient delta exactly `7000000000000000` atto. Studio's `value_credited` flag is not used as proof — it has reported `false` on transfers that succeeded by real balance delta.
 
 `_pay_native` now uses that storage-Address shape. `staker` / `appeal_filer` are storage fields, same as Run C's `self.stored`. Zero amount is a no-op, not an error.
 
@@ -66,7 +66,7 @@ The weeks-old belief that Studionet cannot IC→EOA was a type-handling bug, iso
 - `resolve_verdict` / `resolve_appeal` / `expire_appeal` call `_pay_native`, which `emit_transfer`s from the contract.
 - The keeper still *calls* those methods on a clock. It does not send the payout GEN (`creditResolvedWinners` / `creditRefundedStakers` are observation-only).
 
-**Live proof, this bytecode, no keeper send:** claim #1 on `0x1b8Fc1a2…`, `ETH/USD above 999999` → `RESOLVED BROKEN`. Wallet B staked 1 GEN against; wallet A staked 1 GEN for. Resolve `0xcf5625e1a82ba472c6f93eee7020e503a500f0b0e41304050c17faf7065a0ac1` SUCCESS. Child `0xe6c5a6d5ee4cd4f71a6f6bc9cac61b8a5ccf60bdaf8f3e41d1ca46367aacc366` to `0xcE0ae5…`, value 2 GEN, `value_credited: true`, status FINALIZED. Wallet B `getBalance` 37 → 39 GEN.
+**Live proof, this bytecode, no keeper send:** claim #1 on `0x0312c04c…`, `ETH/USD above 999999` → `RESOLVED BROKEN`, `paid: true`. Wallet B staked 1 GEN against; wallet A staked 1 GEN for. Resolve `0x7473f85da11fab6680e916e00870782224956a0204d26e62eaed0043d37f056e` SUCCESS. Child `0x525cab65a9ef86d2e26f6657eae8d9b7d2177d53ea9f8ca503bfe7b8e93fc89e` to `0xcE0ae5…`, value 2 GEN, status FINALIZED. Wallet B `getBalance` 38 → 40 GEN. A second `retry_payout` from the winner rolled back (`[EXPECTED] only the claim poster or keeper may retry payout`, `0xc88779da…`). A second call from the poster/keeper rolled back (`[EXPECTED] claim already paid`, `0x38887c74…`). Wallet B `getBalance` after both retries: still 40 GEN (delta 0).
 
 **Scope:** this is Studionet (chain `61999`). Testnet Asimov/Bradbury (chain `4221`) still use the GenLayer Chain ghost-contract path the official docs describe. If this project leaves Studionet, `_pay_native` has to be re-proven there. The pinned runner `py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6` is what this Studionet instance accepts; a newer runner exists upstream, and the current official faucet failed to deploy here.
 
@@ -76,14 +76,14 @@ The weeks-old belief that Studionet cannot IC→EOA was a type-handling bug, iso
 
 | | |
 |---|---|
-| Live court | `0x1b8Fc1a2B16352228f2016DB1BBbeAaBA9192B37` |
+| Live court | `0x0312c04cA7a5D29025f01d9487e62Fb4fe182C04` |
 | Deposit / treasury | the court itself (`SELF`) |
-| Retired courts | `0xd3cD69…`, `0x8b2fF616…`, `0x22Cf7A9e…`, `0xF9Df5e7b…`, `0x219e7531…` |
+| Retired courts | `0xd3cD69…`, `0x8b2fF616…`, `0x22Cf7A9e…`, `0xF9Df5e7b…`, `0x219e7531…`, `0x1b8Fc1a2…` |
 | Network | studionet, chain `61999` |
-| Direct tests | **99 passed, 0 failed** (`pytest test/direct/`) |
-| Deploy tx (live court) | `0xc3dfcfa72a4545c15c699036edb7fa8e7306963878e3a9045c39d5ef8976930f` |
+| Direct tests | **106 passed, 0 failed** (`pytest test/direct/`) |
+| Deploy tx (live court) | `0x71326b5aebebd20c045ed0037a153a67ba1e0dfa63424f68576cba9220c0b4e1` |
 
-**Two full lifecycles on the live court, run end-to-end after deploy** (real txs, real ~90-second real-time wait for the deadline to actually elapse, real leader + validator consensus — not a direct-mode mock):
+**Two full lifecycles on a prior court, preserved as §4's cache-deletion proof** (not the current live address; the current court's own cycle is in §2 / §5). Real txs, real ~90-second wait, real leader + validator consensus — not a direct-mode mock:
 
 | Step | Claim | Tx |
 |---|---|---|
@@ -177,8 +177,11 @@ Full transcript, real claim/tx hashes in this session's record; methodology in `
 - **Keeper still has to trigger lock/resolve/expire.** Those methods are permissionless but not automatic. The keeper no longer *funds* payouts.
 - **GLSim local integration tests are blocked** by an upstream tool bug ([genlayerlabs/genlayer-studio#1727](https://github.com/genlayerlabs/genlayer-studio/issues/1727)). Direct-mode tests and the live studionet deployment are independent of that.
 - **Live `CONTESTED` cannot be reliably forced** on a public validator set for a demo. The appeal path is fully proven in direct-mode tests (`test/direct/test_appeals.py`).
+- **Direct-mode tests cannot exercise the real `EthSend` path.** The harness intercepts `EthSend`/`PostMessage` and credits `vm._balances` directly (`apply_native_send` in `test/direct/tx_helpers.py`). The exact bug class that caused the original `Address`-construction failure (`SystemError: 2 inval` on a calldata-typed Address) is invisible to it — only a live cycle proved that specific fix.
+- **Self-treasury coverage is now present, but still bounded by the harness above.** `test/direct/test_self_treasury.py` deploys with `treasury = "SELF"` (not the placeholder) and covers constructor rotation to `contract_address`, hash verification against that address, a real payout that sets `paid`, and `__receive__` being callable. The rest of the suite still uses a fixed placeholder so Studio RPC mocks stay stable. Direct mode still cannot prove the real `EthSend` type-handling that the live cycle had to.
+- **Local `genvm-lint` rejects `__receive__`.** Official docs and the SDK's `Contract.__receive__` require `@gl.public.write.payable def __receive__`. The linter's `get_schema` still treats public names starting with `__` as an error (it already exempts `__on_errored_message__`, not `__receive__`). Deploy on this Studionet instance succeeded anyway; deposits on the live cycle were bare native sends.
 
-## 5. Non-custodial deposits — the missing half of the steward's request
+## 5. Contract-held deposits with a working payout
 
 **Steward, quoted in full (first and second review):**
 
@@ -186,17 +189,17 @@ Full transcript, real claim/tx hashes in this session's record; methodology in `
 
 > The requested complete settlement fix is still missing: the contract continues to custody stakes and appeal bonds while its payout function remains a no-op, so the separately funded keeper only reimburses users without releasing the funds held by the contract. Since the resubmission does not resolve the previous request, we cannot proceed with it in its current form.
 
-Sentence by sentence, on the live court `0x1b8Fc1a2…`:
+The design is custodial on purpose: the contract holds the GEN and pays it out. Sentence by sentence, on the live court `0x0312c04c…`:
 
 | Steward sentence | What is now true |
 |---|---|
 | "Contract-held stakes and appeal bonds must either be released through a working repository-backed payout/refund path **or** the staking design must stop custodying funds it cannot return." | The first option, now that `_pay_native` works on Studionet. Deposits are still tx-hash verified; the destination is this contract (`SELF`), so the GEN paid out is the GEN users sent. |
-| "the contract continues to custody stakes and appeal bonds while its payout function remains a no-op" | Custody is real and so is payout. `resolve_verdict` child `0xe6c5a6d5…` credited 2 GEN to the winner. |
+| "the contract continues to custody stakes and appeal bonds while its payout function remains a no-op" | Custody is real and so is payout. `resolve_verdict` child `0x525cab65…` paid 2 GEN; winner `getBalance` 38 → 40 GEN. |
 | "the separately funded keeper only reimburses users without releasing the funds held by the contract" | The keeper no longer reimburses. It only triggers lock/resolve/expire. |
 | "Derive or verify every keeper recipient and amount against contract state instead of trusting the unauthenticated stake cache" | Already done in §4. Not re-done. Still true on this bytecode. |
 | "enforce the staking and appeal deadlines inside the contract methods" | Already done in §4b. Timestamp checks still run *before* the new tx-hash fetch, so a late stake does not consume a genuine transfer hash. Direct tests still pass. |
 | "Add tests showing fabricated or missing cache rows cannot change payouts and that late stakes and appeals revert." | Cache tests remain from §4. New tests in `test/direct/test_tx_verification.py` plus the live cycle below cover fabricated/mismatched hashes, replay, late stakes, and a genuine matching transfer. |
-| "Since the resubmission does not resolve the previous request" | This court is a new deploy. The payable court `0xF9Df5e7b…` is retired. |
+| "Since the resubmission does not resolve the previous request" | This court is a new deploy. The payable court `0xF9Df5e7b…` and the drain-vulnerable court `0x1b8Fc1a2…` are retired. |
 
 **Step 0 probe (hard gate, ran first, on a throwaway contract):** validators independently fetched a real keeper-send from this project's history (`0x74d2d0ed6b0e375c61a207ffea663b72197f4e47207392f73e9f77d58b91398f`, 10 GEN) via Studio `eth_getTransactionByHash`, `strict_eq` on canonical `{from,to,value,status}`. Probe contract `0x55F07Ac9e2e156f05dd0cA83bB60a59907250AAE`, probe tx `0x588197f70baa30681f50c397bd71a2769b0d468072ecd6c60802365c85eddd8a`, **FINALIZED (status 7), execution SUCCESS**. Stored result:
 
@@ -204,20 +207,23 @@ Sentence by sentence, on the live court `0x1b8Fc1a2…`:
 
 That matches the independently-known fields for that send. Only then was the court rewritten.
 
-**Adversarial direct tests** (`test/direct/test_tx_verification.py`, plus payout/refund balance assertions in `test_staking.py` / `test_appeals.py`): fabricated/missing hash rejected; wrong recipient rejected; wrong sender rejected; amount below 1 GEN rejected; replay of a consumed hash rejected; a hash whose canonical `to` is a retired treasury is rejected on the new court; late stake reverts on the timestamp check *without* consuming the hash; a genuine matching transfer records the real amount; multiple winners are credited the hand-calculated split; refunds and bond-return credit real balances; a zero losing-pool payout returns the stake and does not error. Full suite: **99 passed, 0 failed**.
+**Adversarial direct tests** (`test/direct/test_tx_verification.py`, `test_retry_payout_idempotence.py`, `test_self_treasury.py`, plus payout/refund balance assertions in `test_staking.py` / `test_appeals.py`): fabricated/missing hash rejected; wrong recipient rejected; wrong sender rejected; amount below 1 GEN rejected; replay of a consumed hash rejected; a hash whose canonical `to` is a retired treasury is rejected on the new court; late stake reverts on the timestamp check *without* consuming the hash; a genuine matching transfer records the real amount; multiple winners are credited the hand-calculated split; refunds and bond-return credit real balances; a zero losing-pool payout returns the stake and does not error; a second `retry_payout` after a real payout reverts `claim already paid` (not a silent no-op) and does not move GEN; a losing staker cannot retry even if `paid` is forced false in storage; `treasury = SELF` deploys with the contract's own address. Full suite: **106 passed, 0 failed**.
 
-**Live cycle on this exact court** (real Studio consensus, not a mock; no `sendAsKeeper`):
+**Live cycle on this exact court** (real Studio consensus, not a mock; no `sendAsKeeper`; deposits are bare native sends, so `__receive__` is on the path):
 
 | Step | Result | Tx |
 |---|---|---|
-| Deploy | FINALIZED, SUCCESS, treasury `SELF` = `0x1b8Fc1a2…` | `0xc3dfcfa72a4545c15c699036edb7fa8e7306963878e3a9045c39d5ef8976930f` |
-| Create claim #1 (`ETH/USD above 999999`) | SUCCESS | `0x1315ff25fda655628c9df3dd765ea5565aabf3008579cdb5037a7d42520a2ef2` |
-| Native 1 GEN A → court, `stake_for` | SUCCESS | send `0xcaa3a188…` / register `0x7281bdfb…` |
-| Native 1 GEN B → court, `stake_against` | SUCCESS | send `0x2b06e792…` / register `0x92446c62…` |
-| Same hash replayed | ERROR | `0x169ad67b…` |
-| `lock_deadline_evidence` | SUCCESS | `0x004da4c4…` |
-| `resolve_verdict` → **RESOLVED BROKEN** | SUCCESS | `0xcf5625e1a82ba472c6f93eee7020e503a500f0b0e41304050c17faf7065a0ac1` |
-| Contract `emit_transfer` child | FINALIZED, `value_credited: true`, 2 GEN to B | `0xe6c5a6d5ee4cd4f71a6f6bc9cac61b8a5ccf60bdaf8f3e41d1ca46367aacc366` |
-| Winner `getBalance` | 37 → 39 GEN (+2.0) | no keeper send |
+| Deploy | SUCCESS, treasury `SELF` = `0x0312c04c…` | `0x71326b5aebebd20c045ed0037a153a67ba1e0dfa63424f68576cba9220c0b4e1` |
+| Create claim #1 (`ETH/USD above 999999`) | SUCCESS | `0xdbffb0ae84a83e85c9f925aac1fd69f6b6a8b7b76690e9a7b88e1f6cfd083f75` |
+| Native 1 GEN A → court, `stake_for` | SUCCESS | send `0x3c79b014…` / register `0x6495cf03…` |
+| Native 1 GEN B → court, `stake_against` | SUCCESS | send `0xbfd85b98…` / register `0x6f6a0e6d…` |
+| Same hash replayed | ERROR | `0x6cd901a0…` |
+| `lock_deadline_evidence` | SUCCESS | `0x21a7d2ee…` |
+| `resolve_verdict` → **RESOLVED BROKEN**, `paid: true` | SUCCESS | `0x7473f85da11fab6680e916e00870782224956a0204d26e62eaed0043d37f056e` |
+| Contract `emit_transfer` child | FINALIZED, 2 GEN to B | `0x525cab65a9ef86d2e26f6657eae8d9b7d2177d53ea9f8ca503bfe7b8e93fc89e` |
+| Winner `getBalance` | 38 → 40 GEN (+2.0) | no keeper send |
+| `retry_payout` from winner B | rollback, `[EXPECTED] only the claim poster or keeper may retry payout` | `0xc88779da8cab25f94cd6ac4dfcd1ff3210b320e9c34f9635b6484ad4994be091` |
+| `retry_payout` from poster/keeper A | rollback, `[EXPECTED] claim already paid` | `0x38887c74e02c559e8ed1a9794ddfade241f9d93c0f6f12e63cf417b755d31c8c` |
+| Winner `getBalance` after both retries | still 40 GEN (delta 0) | — |
 
 **What this still does not claim:** the same `emit_transfer` shape is unproven on Testnet Asimov/Bradbury (chain `4221`). The keeper is still the clock that calls lock/resolve/expire.

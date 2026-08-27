@@ -8,10 +8,7 @@ const CONTRACT =
   process.env.ALPHA_COURT_CONTRACT_ADDRESS ||
   process.env.NEXT_PUBLIC_ALPHA_COURT_CONTRACT_ADDRESS ||
   "";
-const TREASURY =
-  process.env.NEXT_PUBLIC_TREASURY_ADDRESS ||
-  CONTRACT ||
-  "0x1b8Fc1a2B16352228f2016DB1BBbeAaBA9192B37";
+const TREASURY = process.env.NEXT_PUBLIC_TREASURY_ADDRESS || CONTRACT;
 
 const nextConfig: NextConfig = {
   env: {

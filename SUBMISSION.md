@@ -80,7 +80,7 @@ The weeks-old belief that Studionet cannot IC→EOA was a type-handling bug, iso
 | Deposit / treasury | the court itself (`SELF`) |
 | Retired courts | `0xd3cD69…`, `0x8b2fF616…`, `0x22Cf7A9e…`, `0xF9Df5e7b…`, `0x219e7531…`, `0x1b8Fc1a2…` |
 | Network | studionet, chain `61999` |
-| Direct tests | **106 passed, 0 failed** (`pytest test/direct/`) |
+| Direct tests | Re-run `pytest test/direct/` locally; do not cite a count until that run (prior 106/111 figures are stale after §6). |
 | Deploy tx (live court) | `0x71326b5aebebd20c045ed0037a153a67ba1e0dfa63424f68576cba9220c0b4e1` |
 
 **Two full lifecycles on a prior court, preserved as §4's cache-deletion proof** (not the current live address; the current court's own cycle is in §2 / §5). Real txs, real ~90-second wait, real leader + validator consensus — not a direct-mode mock:
@@ -207,7 +207,7 @@ The design is custodial on purpose: the contract holds the GEN and pays it out. 
 
 That matches the independently-known fields for that send. Only then was the court rewritten.
 
-**Adversarial direct tests** (`test/direct/test_tx_verification.py`, `test_retry_payout_idempotence.py`, `test_self_treasury.py`, plus payout/refund balance assertions in `test_staking.py` / `test_appeals.py`): fabricated/missing hash rejected; wrong recipient rejected; wrong sender rejected; amount below 1 GEN rejected; replay of a consumed hash rejected; a hash whose canonical `to` is a retired treasury is rejected on the new court; late stake reverts on the timestamp check *without* consuming the hash; a genuine matching transfer records the real amount; multiple winners are credited the hand-calculated split; refunds and bond-return credit real balances; a zero losing-pool payout returns the stake and does not error; a second `retry_payout` after a real payout reverts `claim already paid` (not a silent no-op) and does not move GEN; a losing staker cannot retry even if `paid` is forced false in storage; `treasury = SELF` deploys with the contract's own address. Full suite: **106 passed, 0 failed**.
+**Adversarial direct tests** (`test/direct/test_tx_verification.py`, `test_retry_payout_idempotence.py`, `test_self_treasury.py`, plus payout/refund balance assertions in `test_staking.py` / `test_appeals.py`): fabricated/missing hash rejected; wrong recipient rejected; wrong sender rejected; amount below 1 GEN rejected; replay of a consumed hash rejected; a hash whose canonical `to` is a retired treasury is rejected on the new court; late stake reverts on the timestamp check *without* consuming the hash; a genuine matching transfer records the real amount; multiple winners are credited the hand-calculated split; refunds and bond-return credit real balances; a zero losing-pool payout returns the stake and does not error; a second `retry_payout` after a real payout reverts `claim already paid` (not a silent no-op) and does not move GEN; a losing staker cannot retry even if `paid` is forced false in storage; `treasury = SELF` deploys with the contract's own address. Full suite: re-run `pytest test/direct/` locally; do not cite a count until that run.
 
 **Live cycle on this exact court** (real Studio consensus, not a mock; no `sendAsKeeper`; deposits are bare native sends, so `__receive__` is on the path):
 
@@ -233,23 +233,38 @@ That matches the independently-known fields for that send. Only then was the cou
 **Steward Feedback:**
 > *"make deadline evidence verifiably correspond to the claim's declared time, parse and validate deadlines canonically, and add a defined refund or reallocation path when the winning side has no stakers. Please include focused tests showing that delayed locking cannot change the sampled settlement time and that every terminal payout branch accounts for all deposited funds."*
 
-Every point addressed directly in contract logic with 100% test coverage (**111 passed, 0 failed** in `pytest test/direct/`):
+Every point is addressed in contract logic. Direct-mode coverage is in `contract/test/direct/test_steward_resubmission_fixes.py`. **Pass count:** run `pytest test/direct/` locally from `contract/`; do not cite a count until that run. Prior "106 passed" / "111 passed" figures in this document are stale relative to this change and are not re-asserted here.
 
 ### 6a. Verifiable Declared-Time Deadline Evidence
-- **Fix:** In `lock_deadline_evidence`, `_fetch_price_with_consensus`, `_fetch_prices_with_consensus`, and `_fetch_fundamentals_with_consensus`, the contract accepts `target_time: str` and queries the Surf API specifically with `&timestamp={claim.deadline}`, recording `claim.deadline_fetched_at = claim.deadline`.
-- **Invariance:** Delayed locking ($T_{\text{lock}} > T_{\text{deadline}}$) queries and freezes the historical evidence as of the declared deadline timestamp. The sampled settlement price/metric and timestamp cannot change regardless of when `lock_deadline_evidence` is executed.
+
+Surf's documented `GET /gateway/v1/market/price` accepts `symbol`, `time_range`, `from`, `to`, `currency`. It does **not** document `timestamp=`. `from`/`to` are Unix seconds or `YYYY-MM-DD` and must be used together. A 1-day window returns 5-minute points.
+
+- **Lock path** (`target_time` = `claim.deadline`): URL is `{base}/market/price?symbol={asset}&from={unix_from}&to={unix_to}` where `unix_to = unix(claim.deadline)` and `unix_from = unix_to - 86400`. The series is parsed; the selected point is the latest whose timestamp is **≤ deadline**. Never `data[0]`. Never a point after the deadline. If none qualify, the contract raises `gl.vm.UserError` with `[EXTERNAL]` (deterministic). `deadline_fetched_at` is that payload point's timestamp, normalized to `YYYY-MM-DDTHH:MM:SSZ` — not `claim.deadline` assigned blindly. Point timestamps may be unix int/float or ISO strings.
+- **Relative performance:** both assets are queried with the same `from`/`to`; each selects ≤ deadline; shared `fetched_at` is the later of the two selected point times (still ≤ deadline).
+- **Fundamentals:** lock no longer appends `timestamp=`. Selection is the latest series point ≤ deadline. The previous fallback that picked the earliest point when none qualified is deleted (that could sample post-deadline). Same `[EXTERNAL]` if none ≤ deadline. The selected point's timestamp is persisted as `fetched_at`.
+- **Posting path** (no `target_time`): live `?symbol=` (and current fundamentals URLs without `from`/`to`). `fetched_at` stays `gl.message_raw["datetime"]`. If live `/market/price` returns a list, the MAX-timestamp point is used, not `data[0]`.
+
+Delayed locking cannot change the sampled settlement time or price: a later lock still uses the same `from`/`to` window and still picks the last point ≤ the declared deadline. Tests feed a series whose first element is a post-deadline trap (9999) and require the lock URL to contain `from=` and `to=`; a live-only or `timestamp=` implementation cannot match that mock and cannot store 2800.0 at `2026-08-01T11:00:00Z`.
+
+This does **not** claim Surf honors `timestamp=`. It does not.
 
 ### 6b. Canonical Deadline Parsing & Validation
-- **Fix:** Implemented `_parse_and_validate_canonical_deadline(deadline_raw, current_time_str)` across all three claim creation methods (`create_claim`, `create_relative_performance_claim`, `create_fundamentals_claim`).
-- **Enforcement:** Enforces strict ISO-8601 UTC format (`YYYY-MM-DDTHH:MM:SSZ` or with fractional seconds), rejects non-UTC offsets (e.g. `+02:00`), unpadded components (`YYYY-M-D`), missing `T` separator, and non-ISO strings. Validates that the declared deadline is strictly in the future relative to the current block datetime (`gl.message_raw["datetime"]`).
+
+Implemented `_parse_and_validate_canonical_deadline(deadline_raw, current_time_str)` across all three claim creation methods (`create_claim`, `create_relative_performance_claim`, `create_fundamentals_claim`). Enforces strict ISO-8601 UTC (`YYYY-MM-DDTHH:MM:SSZ` or with fractional seconds), rejects space delimiters, missing `Z`, non-UTC offsets (e.g. `+02:00`), unpadded dates, empty strings, and past deadlines.
 
 ### 6c. Defined Refund Path When Winning Side Has No Stakers
-- **Fix:** In `_payout_for_claim`, when `winning_pool == 0` (e.g., decisive outcome HELD but stakers only staked AGAINST, or BROKEN with only FOR stakers), the contract immediately executes `self._refund_all_stakes(claim)`.
-- **Invariance:** 100% of all deposited stakes are returned to their depositors via `emit_transfer`. Zero deposited funds remain stranded in contract balance.
 
-### 6d. 100% Fund Accounting Across All Terminal Branches
-`contract/test/direct/test_steward_resubmission_fixes.py` adds focused tests verifying complete fund conservation across every terminal branch:
-1. `test_delayed_locking_samples_declared_deadline_evidence`: Proves delayed locking pins settlement price and timestamp to declared deadline.
-2. `test_create_claim_enforces_canonical_deadline` & `test_relative_and_fundamentals_claim_enforces_canonical_deadline`: Proves canonical parsing and rejection of malformed/past deadlines.
-3. `test_zero_stakers_on_winning_side_refunds_all_deposited_funds`: Proves 100% refund when winning pool has zero stakers.
-4. `test_all_terminal_payout_branches_account_for_all_deposited_funds`: Proves 100% fund disbursement across all 5 terminal payout paths (Normal Win, Zero-Winner Refund, Expired Appeal Refund, Settled Appeal Win + Bond Return, and No-Agreement Stake Refund + Bond Split).
+In `_payout_for_claim`, when `winning_pool == 0`, the contract calls `_refund_all_stakes` and returns. 100% of deposited stakes go back to their depositors. Empty winning pool is no longer a silent leftover-share no-op.
+
+**SETTLED + winning_pool == 0:** AGAINST-only (or FOR-only) stakes are refunded, then `_return_appeal_bond` still returns the bond to the filer, so 100% of stakes+bond leave.
+
+### 6d. 100% Fund Accounting, including 0-staker NO_AGREEMENT
+
+`_distribute_bond_evenly`: when `unique_stakers` is empty AND `appeal_bond_atto > 0` AND `appeal_filer != ZERO_ADDRESS`, pay 100% of the bond back to the filer (the only depositor). Do not no-op and strand the 1 GEN floor bond. When `unique_stakers` is non-empty, keep the even split.
+
+`contract/test/direct/test_steward_resubmission_fixes.py` covers:
+
+1. Delayed lock on all three claim types, with a post-deadline `data[0]` trap and `from`/`to` URL requirement; two post-deadline lock times store the same snapshot time and deadline-or-before price.
+2. Canonical parsing matrix (space, missing Z, `+02:00`, unpadded date, empty, past) on create_claim, relative, and fundamentals.
+3. Zero-winner RESOLVED refund.
+4. All 5 original terminal branches, plus SETTLED + winning_pool==0 (stakes refunded + bond to filer) and NO_AGREEMENT + zero original stakers (filer balance += 1 GEN; bond does not remain in the contract).

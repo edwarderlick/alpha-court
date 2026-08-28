@@ -220,6 +220,21 @@ def test_all_terminal_payout_branches_account_for_all_deposited_funds(direct_dep
 	assert balance_of(direct_vm, STAKER_A) == 3 * ATTO
 	assert balance_of(direct_vm, STAKER_B) == 0
 	
+	# --- Branch 2: Zero-Winner RESOLVED (0 GEN FOR vs 3 GEN AGAINST -> HELD outcome refunds 3 GEN) ---
+	cid2 = c.create_claim("ETH/USD", "2500.0", "above", FUTURE_DEADLINE)
+	register_stake(c, direct_vm, cid2, "against", 3 * ATTO, STAKER_B)
+	
+	claim2 = c.claims[cid2]
+	claim2.state = "EVIDENCE_LOCKED"
+	claim2.deadline_price_atto = 3000 * ATTO
+	claim2.deadline_fetched_at = DECLARED_DEADLINE
+	c.claims[cid2] = claim2
+	
+	bal_b_before = balance_of(direct_vm, STAKER_B)
+	c.resolve_verdict(cid2)
+	# Against staker B receives 100% refund of 3 GEN stake (100% of 3 GEN deposited)
+	assert balance_of(direct_vm, STAKER_B) == bal_b_before + 3 * ATTO
+	
 	# --- Branch 3: REFUNDED via expire_appeal (2 GEN FOR + 1 GEN AGAINST) ---
 	cid3 = c.create_claim("ETH/USD", "2500.0", "above", FUTURE_DEADLINE)
 	register_stake(c, direct_vm, cid3, "for", 2 * ATTO, STAKER_A)

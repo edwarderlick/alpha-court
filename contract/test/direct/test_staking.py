@@ -425,12 +425,12 @@ def test_zero_losing_pool_pays_stake_back_without_error(
 	assert balance_of(direct_vm, direct_bob) == 2 * ATTO
 
 
-def test_no_stakers_on_winning_side_pays_out_nothing(
+def test_no_stakers_on_winning_side_refunds_all_deposited_stakes(
 	direct_vm, direct_deploy, direct_alice, direct_bob
 ):
 	"""Only a losing-side stake exists; winning side has zero stakers --
-	_payout_for_claim must return early (winning_pool == 0) without
-	attempting any transfer, and must not revert resolve_verdict."""
+	defined refund path: _payout_for_claim must refund all deposited stakes
+	via _refund_all_stakes so that 100% of deposited funds are returned."""
 	install_transfer_hook(direct_vm)
 	contract = deploy(direct_deploy)
 
@@ -448,7 +448,8 @@ def test_no_stakers_on_winning_side_pays_out_nothing(
 	claim = contract.get_claim(claim_id)
 	assert claim["state"] == "RESOLVED"
 	assert claim["paid"] is True
-	assert balance_of(direct_vm, direct_bob) == 0  # against side: no payout, stake stays locked
+	# Defined refund path: Bob receives 100% refund of his 2 GEN stake
+	assert balance_of(direct_vm, direct_bob) == 2 * ATTO
 	direct_vm.sender = direct_alice
 	with direct_vm.expect_revert("claim already paid"):
 		contract.retry_payout(claim_id)

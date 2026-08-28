@@ -197,9 +197,17 @@ async function buildRow(
   const transfers = await payoutsFor(addr, claim.claim_id, claim.origin_contract);
   const winner = winningSide(claim.consensus_result);
   let outcome: StakeRow["outcome"] = "pending";
+  const winPoolAtto = winner
+    ? genToAtto(winner === "for" ? claim.stake_for_total : claim.stake_against_total)
+    : 0n;
   if (claim.state === "REFUNDED") outcome = "refunded";
   else if (claim.state === "RESOLVED" && winner) {
-    outcome = winner === side ? "won" : "lost";
+    if (winPoolAtto === 0n) {
+      // Defined refund path: when winning side has no stakers, all deposited stakes are refunded on-chain
+      outcome = "refunded";
+    } else {
+      outcome = winner === side ? "won" : "lost";
+    }
   }
   const payoutRow =
     outcome === "won"
@@ -219,7 +227,6 @@ async function buildRow(
     payoutAtto = payoutRow.valueAtto ?? null;
   } else if (outcome === "won") {
     try {
-      const winPoolAtto = genToAtto(winner === "for" ? claim.stake_for_total : claim.stake_against_total);
       const losePoolAtto = genToAtto(winner === "for" ? claim.stake_against_total : claim.stake_for_total);
       const userStake = BigInt(amountAtto);
       if (winPoolAtto > 0n && userStake > 0n) {

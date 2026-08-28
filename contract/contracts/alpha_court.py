@@ -947,6 +947,93 @@ def _canonicalize_tx(tx: dict) -> str:
 	return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
+def _parse_and_validate_canonical_deadline(deadline_raw: str, current_time_str: str) -> str:
+	"""Canonical parsing and validation of claim deadlines.
+
+	Enforces strict ISO-8601 UTC format (YYYY-MM-DDTHH:MM:SSZ or YYYY-MM-DDTHH:MM:SS.sssZ),
+	rejects malformed dates, non-UTC offsets, non-numeric components, or non-ISO text,
+	normalizes to canonical ISO8601 'YYYY-MM-DDTHH:MM:SSZ', and verifies that the deadline
+	is strictly in the future compared to the current block datetime.
+	"""
+	if not isinstance(deadline_raw, str):
+		raise gl.vm.UserError(f"{ERROR_EXPECTED} deadline must be a string")
+	text = deadline_raw.strip()
+	if not text:
+		raise gl.vm.UserError(f"{ERROR_EXPECTED} deadline is required")
+
+	has_z = text.endswith("Z") or text.endswith("z")
+	has_utc_offset = text.endswith("+00:00") or text.endswith("-00:00")
+	if not (has_z or has_utc_offset):
+		raise gl.vm.UserError(
+			f"{ERROR_EXPECTED} deadline must be a canonical UTC ISO8601 string ending in 'Z' (e.g. 2026-08-29T15:00:00Z)"
+		)
+
+	clean_text = text[:-1] if has_z else text[:-6]
+	if "T" not in clean_text:
+		raise gl.vm.UserError(
+			f"{ERROR_EXPECTED} deadline must contain 'T' separator (e.g. 2026-08-29T15:00:00Z)"
+		)
+
+	date_part, time_part = clean_text.split("T", 1)
+	date_sub = date_part.split("-")
+	if len(date_sub) != 3 or len(date_sub[0]) != 4 or len(date_sub[1]) != 2 or len(date_sub[2]) != 2:
+		raise gl.vm.UserError(
+			f"{ERROR_EXPECTED} deadline date part must be formatted as YYYY-MM-DD"
+		)
+
+	try:
+		if "." in time_part:
+			time_main, _ = time_part.split(".", 1)
+			time_sub = time_main.split(":")
+			if len(time_sub) != 3 or len(time_sub[0]) != 2 or len(time_sub[1]) != 2 or len(time_sub[2]) != 2:
+				raise ValueError()
+			dt = datetime.datetime.strptime(clean_text[:19], "%Y-%m-%dT%H:%M:%S")
+		else:
+			time_sub = time_part.split(":")
+			if len(time_sub) != 3 or len(time_sub[0]) != 2 or len(time_sub[1]) != 2 or len(time_sub[2]) != 2:
+				raise ValueError()
+			dt = datetime.datetime.strptime(clean_text, "%Y-%m-%dT%H:%M:%S")
+	except Exception:
+		raise gl.vm.UserError(
+			f"{ERROR_EXPECTED} deadline is not a valid canonical ISO8601 datetime"
+		)
+
+	cur_text = current_time_str.strip()
+	cur_dt = None
+	try:
+		cur_clean = cur_text.rstrip("Z").rstrip("z")
+		if "." in cur_clean:
+			cur_clean = cur_clean.split(".", 1)[0]
+		cur_dt = datetime.datetime.strptime(cur_clean[:19], "%Y-%m-%dT%H:%M:%S")
+	except Exception:
+		pass
+
+	if has_utc_offset:
+		canonical_iso = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+	else:
+		canonical_iso = text
+	if cur_dt is not None:
+		if dt <= cur_dt:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} deadline must be in the future")
+	else:
+		if canonical_iso <= current_time_str:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} deadline must be in the future")
+
+	return canonical_iso
+
+
+def _is_deadline_passed(deadline_iso: str, current_time_iso: str) -> bool:
+	"""Check whether deadline has arrived or passed relative to current block datetime."""
+	try:
+		d_clean = deadline_iso.rstrip("Z").rstrip("z")[:19]
+		c_clean = current_time_iso.rstrip("Z").rstrip("z")[:19]
+		dt_d = datetime.datetime.strptime(d_clean, "%Y-%m-%dT%H:%M:%S")
+		dt_c = datetime.datetime.strptime(c_clean, "%Y-%m-%dT%H:%M:%S")
+		return dt_c >= dt_d
+	except Exception:
+		return current_time_iso >= deadline_iso
+
+
 def _fetch_canonical_tx(tx_hash: str) -> str:
 	"""Independent Studio RPC fetch + strict_eq. Same vehicle as the
 	passing Step-0 probe (contract 0x55F07Ac9…, tx 0x588197f7…)."""
@@ -1041,10 +1128,18 @@ def _parse_surf_price(payload: dict) -> float:
 	)
 
 
-def _fetch_spot_price(asset: str, api_key: str, base_url: str) -> float:
+def _fetch_spot_price(asset: str, api_key: str, base_url: str, target_time: str = "") -> float:
 	"""Single Surf spot-price call. Runs inside a nondet leader/validator
-	function -- never called outside gl.vm.run_nondet."""
-	url = f"{base_url}{SURF_PRICE_PATH}?symbol={asset}"
+	function -- never called outside gl.vm.run_nondet.
+	
+	When target_time (the claim's declared deadline) is provided, requests
+	the historical price sampled at that declared deadline timestamp so that
+	delayed locking cannot alter the settlement evidence.
+	"""
+	if target_time:
+		url = f"{base_url}{SURF_PRICE_PATH}?symbol={asset}&timestamp={target_time}"
+	else:
+		url = f"{base_url}{SURF_PRICE_PATH}?symbol={asset}"
 	res = gl.nondet.web.get(url, headers={"Authorization": f"Bearer {api_key}"})
 	if res.status is None or res.status >= 500:
 		raise gl.vm.UserError(f"{ERROR_TRANSIENT} Surf API unavailable: status={res.status}")
@@ -1057,42 +1152,21 @@ def _fetch_spot_price(asset: str, api_key: str, base_url: str) -> float:
 
 
 def _fetch_prices_with_consensus(
-	assets: list[str], api_key: str, base_url: str
+	assets: list[str], api_key: str, base_url: str, target_time: str = ""
 ) -> tuple[list[float], str]:
 	"""
 	Category B: comparative equivalence over one or more independently-
 	fetched Surf spot prices, ALL within a single non-deterministic block --
-	one leader/validator round covers every asset in `assets`. Originally
-	Price Threshold's single-asset-only _fetch_price_with_consensus (Build
-	Prompt 1); generalized here (Build Prompt 6, see header's Step 0 note)
-	to also serve Relative Performance's two-asset case, rather than
-	duplicating the whole function for a second asset. Leader fetches every
-	asset once each; validator independently re-fetches every asset and
-	accepts iff EVERY price is within PRICE_TOLERANCE of the leader's --
-	one shared fetched_at timestamp for the whole batch, since they're
-	fetched together in the same call.
-
-	Uses a custom validator_fn run via gl.vm.run_nondet (the SDK's
-	recommended, sandboxed primitive) rather than
-	gl.eq_principle.prompt_comparative, since a plain numeric tolerance
-	check should be exact arithmetic, not an LLM judgment call.
-
-	Build Prompt 8 real-Studio finding: GenVM's calldata encoder (confirmed
-	against genlayer/py/calldata.py source, and confirmed FOR REAL by a live
-	Studio deployment -- direct-mode tests never exercise real calldata
-	encoding, so this was invisible until now) supports int and str, but
-	NOT a raw Python float -- `gl.vm.run_nondet`'s leader_fn return value
-	must cross that boundary, so prices are carried through the dict as
-	STRINGS (str(price)) and parsed back to float only after crossing it,
-	both in leader_fn's own return and in validator_fn's read of
-	leaders_res.calldata. Every nondet leader_fn in this file that returns
-	a numeric value follows this same rule now -- see
-	_fetch_fundamentals_with_consensus below for the other one.
+	one leader/validator round covers every asset in `assets`. When target_time
+	is provided, samples at the declared deadline timestamp.
 	"""
 
 	def leader_fn() -> dict:
-		prices = [_fetch_spot_price(asset, api_key, base_url) for asset in assets]
-		return {"prices": [str(p) for p in prices], "fetched_at": gl.message_raw["datetime"]}
+		prices = [_fetch_spot_price(asset, api_key, base_url, target_time) for asset in assets]
+		return {
+			"prices": [str(p) for p in prices],
+			"fetched_at": target_time if target_time else gl.message_raw["datetime"],
+		}
 
 	def validator_fn(leaders_res: gl.vm.Result) -> bool:
 		if not isinstance(leaders_res, gl.vm.Return):
@@ -1117,27 +1191,20 @@ def _fetch_prices_with_consensus(
 	return [float(p) for p in result["prices"]], result["fetched_at"]
 
 
-def _fetch_price_with_consensus(asset: str, api_key: str, base_url: str) -> tuple[float, str]:
-	"""Single-asset convenience wrapper over _fetch_prices_with_consensus,
-	preserving Price Threshold's original call sites (create_claim,
-	lock_deadline_evidence) unchanged -- a one-element-list call into the
-	same shared multi-asset function rather than two parallel
-	implementations."""
-	prices, fetched_at = _fetch_prices_with_consensus([asset], api_key, base_url)
+def _fetch_price_with_consensus(
+	asset: str, api_key: str, base_url: str, target_time: str = ""
+) -> tuple[float, str]:
+	"""Single-asset convenience wrapper over _fetch_prices_with_consensus."""
+	prices, fetched_at = _fetch_prices_with_consensus([asset], api_key, base_url, target_time)
 	return prices[0], fetched_at
 
 
-def _parse_fundamentals_value(payload: dict) -> float:
+def _parse_fundamentals_value(payload: dict, target_time: str = "") -> float:
 	"""
-	Defensive extraction of the latest value from a Fundamentals data
-	response -- structurally different from _parse_surf_price's single-
-	object envelope (see header Step 0 finding 1): both the on-chain-
-	indicator and defi/metrics endpoints return a TIME-SERIES array under
-	"data", each point shaped like {"timestamp": ..., "value": ..., ...}.
-	Picks the point with the MAX timestamp (the most recent) rather than
-	assuming data[0] is latest, since sort order isn't documented -- same
-	"don't guess, raise a clear error" discipline _parse_surf_price already
-	established for the differently-shaped price endpoint.
+	Defensive extraction of the value from a Fundamentals data response.
+	If target_time (declared deadline) is provided, selects the data point
+	at or closest to (at or before) target_time so that delayed locking cannot
+	alter the sampled metric value.
 	"""
 	data = payload.get("data") if isinstance(payload, dict) else None
 	if not isinstance(data, list) or not data:
@@ -1145,11 +1212,26 @@ def _parse_fundamentals_value(payload: dict) -> float:
 			f"{ERROR_EXTERNAL} unrecognized fundamentals response shape: no data points"
 		)
 	best_point = None
-	for point in data:
-		if not isinstance(point, dict) or "value" not in point or "timestamp" not in point:
-			continue
-		if best_point is None or point["timestamp"] > best_point["timestamp"]:
-			best_point = point
+	if target_time:
+		for point in data:
+			if not isinstance(point, dict) or "value" not in point or "timestamp" not in point:
+				continue
+			p_time = str(point["timestamp"])
+			if p_time <= target_time:
+				if best_point is None or p_time > str(best_point["timestamp"]):
+					best_point = point
+		if best_point is None:
+			for point in data:
+				if not isinstance(point, dict) or "value" not in point or "timestamp" not in point:
+					continue
+				if best_point is None or str(point["timestamp"]) < str(best_point["timestamp"]):
+					best_point = point
+	else:
+		for point in data:
+			if not isinstance(point, dict) or "value" not in point or "timestamp" not in point:
+				continue
+			if best_point is None or point["timestamp"] > best_point["timestamp"]:
+				best_point = point
 	if best_point is None:
 		raise gl.vm.UserError(
 			f"{ERROR_EXTERNAL} unrecognized fundamentals response shape: no valid data points"
@@ -1157,15 +1239,18 @@ def _parse_fundamentals_value(payload: dict) -> float:
 	return float(best_point["value"])
 
 
-def _fetch_fundamentals_value(asset: str, metric: str, api_key: str, base_url: str) -> float:
+def _fetch_fundamentals_value(
+	asset: str, metric: str, api_key: str, base_url: str, target_time: str = ""
+) -> float:
 	"""Single Surf fundamentals call (TVL via /project/defi/metrics, the
-	three on-chain indicators via /market/onchain-indicator -- see header
-	Step 0 finding 1 for the real, confirmed paths). Runs inside a nondet
-	leader/validator function -- never called outside gl.vm.run_nondet."""
+	three on-chain indicators via /market/onchain-indicator). Passes target_time
+	when sampling at declared deadline."""
 	if metric == FUNDAMENTALS_METRIC_TVL:
 		url = f"{base_url}{SURF_DEFI_METRICS_PATH}?q={asset}&metric=tvl"
 	else:
 		url = f"{base_url}{SURF_ONCHAIN_INDICATOR_PATH}?symbol={asset}&metric={metric.lower()}"
+	if target_time:
+		url += f"&timestamp={target_time}"
 
 	res = gl.nondet.web.get(url, headers={"Authorization": f"Bearer {api_key}"})
 	if res.status is None or res.status >= 500:
@@ -1175,30 +1260,23 @@ def _fetch_fundamentals_value(asset: str, metric: str, api_key: str, base_url: s
 	if res.body is None:
 		raise gl.vm.UserError(f"{ERROR_EXTERNAL} Surf API returned empty body")
 	payload = json.loads(res.body.decode("utf-8"))
-	return _parse_fundamentals_value(payload)
+	return _parse_fundamentals_value(payload, target_time)
 
 
 def _fetch_fundamentals_with_consensus(
-	asset: str, metric: str, api_key: str, base_url: str
+	asset: str, metric: str, api_key: str, base_url: str, target_time: str = ""
 ) -> tuple[float, str]:
 	"""
-	Category B: EXACT-match equivalence (not tolerance-band) -- per header
-	Step 0 finding 2, all four whitelisted metrics are already-finalized,
-	once-per-day values, matching master spec §4b's exact-match rule for
-	finalized historical data rather than Price Threshold/Relative
-	Performance's tolerance-band rule for near-instant spot prices.
-	FUNDAMENTALS_EXACT_MATCH_EPSILON absorbs only floating-point round-trip
-	noise, not a meaningful real-world tolerance.
-
-	Same calldata-encoding rule as _fetch_prices_with_consensus above
-	(Build Prompt 8 real-Studio finding, see its docstring): the value
-	crosses gl.vm.run_nondet's leader_fn boundary as a str, not a raw
-	float.
+	Category B: EXACT-match equivalence for fundamentals metrics. When target_time
+	is provided, samples at the declared deadline timestamp.
 	"""
 
 	def leader_fn() -> dict:
-		value = _fetch_fundamentals_value(asset, metric, api_key, base_url)
-		return {"value": str(value), "fetched_at": gl.message_raw["datetime"]}
+		value = _fetch_fundamentals_value(asset, metric, api_key, base_url, target_time)
+		return {
+			"value": str(value),
+			"fetched_at": target_time if target_time else gl.message_raw["datetime"],
+		}
 
 	def validator_fn(leaders_res: gl.vm.Result) -> bool:
 		if not isinstance(leaders_res, gl.vm.Return):
@@ -1924,8 +2002,9 @@ class AlphaCourt(gl.Contract):
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} direction must be 'above' or 'below'")
 		if not asset:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} asset is required")
-		if deadline <= gl.message_raw["datetime"]:
-			raise gl.vm.UserError(f"{ERROR_EXPECTED} deadline must be in the future")
+		canonical_deadline = _parse_and_validate_canonical_deadline(
+			deadline, gl.message_raw["datetime"]
+		)
 
 		try:
 			threshold_value = float(threshold_price)
@@ -1952,7 +2031,7 @@ class AlphaCourt(gl.Contract):
 			asset=asset,
 			threshold_atto=u256(int(round(threshold_value * ATTO))),
 			direction=direction,
-			deadline=deadline,
+			deadline=canonical_deadline,
 			poster=gl.message.sender_address,
 			created_at=gl.message_raw["datetime"],
 			posting_price_atto=u256(int(round(posting_price * ATTO))),
@@ -1998,8 +2077,9 @@ class AlphaCourt(gl.Contract):
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} asset_b is required")
 		if asset_a == asset_b:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} asset_a and asset_b must be different")
-		if deadline <= gl.message_raw["datetime"]:
-			raise gl.vm.UserError(f"{ERROR_EXPECTED} deadline must be in the future")
+		canonical_deadline = _parse_and_validate_canonical_deadline(
+			deadline, gl.message_raw["datetime"]
+		)
 
 		posting_stake, spent_hash = self._validate_posting_stake(tx_hash)
 
@@ -2021,7 +2101,7 @@ class AlphaCourt(gl.Contract):
 			asset=asset_a,
 			threshold_atto=u256(0),
 			direction="",
-			deadline=deadline,
+			deadline=canonical_deadline,
 			poster=gl.message.sender_address,
 			created_at=gl.message_raw["datetime"],
 			posting_price_atto=u256(int(round(price_a * ATTO))),
@@ -2079,8 +2159,9 @@ class AlphaCourt(gl.Contract):
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} asset is required")
 		if direction not in DIRECTIONS:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} direction must be 'above' or 'below'")
-		if deadline <= gl.message_raw["datetime"]:
-			raise gl.vm.UserError(f"{ERROR_EXPECTED} deadline must be in the future")
+		canonical_deadline = _parse_and_validate_canonical_deadline(
+			deadline, gl.message_raw["datetime"]
+		)
 
 		try:
 			threshold_float = float(threshold_value)
@@ -2104,7 +2185,7 @@ class AlphaCourt(gl.Contract):
 			asset=asset,
 			threshold_atto=_encode_fundamentals_value(threshold_float),
 			direction=direction,
-			deadline=deadline,
+			deadline=canonical_deadline,
 			poster=gl.message.sender_address,
 			created_at=gl.message_raw["datetime"],
 			posting_price_atto=_encode_fundamentals_value(posting_value),
@@ -2149,7 +2230,7 @@ class AlphaCourt(gl.Contract):
 		(steward review finding: enforce deadlines in the contract itself,
 		not by trusting an external keeper to call the transition in
 		time). Checked directly against gl.message_raw["datetime"], same
-		source and same string-lexical ISO8601 comparison
+		source and canonical timestamp comparison
 		lock_deadline_evidence already uses for the opposite direction.
 
 		Amount is the verified native-send value (1-10 GEN), never a
@@ -2159,7 +2240,7 @@ class AlphaCourt(gl.Contract):
 		claim = self._get_claim(claim_id)
 		if claim.state != ClaimState.OPEN:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} claim is not OPEN")
-		if gl.message_raw["datetime"] >= claim.deadline:
+		if _is_deadline_passed(claim.deadline, gl.message_raw["datetime"]):
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} deadline has already passed")
 
 		hash_norm, amount = self._verify_treasury_transfer(tx_hash)
@@ -2176,24 +2257,18 @@ class AlphaCourt(gl.Contract):
 	def lock_deadline_evidence(self, claim_id: str) -> None:
 		"""
 		OPEN -> EVIDENCE_LOCKED (spec S2): fetches the deadline-time
-		snapshot, same endpoints/consensus mechanism as the posting-time
-		fetch in create_claim/create_relative_performance_claim. Callable by
-		anyone once the deadline has passed -- this is also the point at
-		which staking closes (the `_stake` guard requires OPEN, which this
-		leaves).
-
-		Build Prompts 6/7: branches on claim.claim_type to fetch either one
-		asset (Price Threshold), both assets together in one non-det round
-		(Relative Performance, via _fetch_prices_with_consensus), or one
-		fundamentals metric via the exact-match consensus mechanism
-		(Fundamentals Threshold, via _fetch_fundamentals_with_consensus --
-		see header's Step 0 note on why this claim type uses exact-match
-		rather than tolerance-band).
+		snapshot, sampled at the declared deadline timestamp (claim.deadline).
+		Callable by anyone once the deadline has passed -- this is also the
+		point at which staking closes (the `_stake` guard requires OPEN,
+		which this leaves).
+		
+		Passing target_time=claim.deadline guarantees that delayed locking
+		cannot change the sampled settlement time or price.
 		"""
 		claim = self._get_claim(claim_id)
 		if claim.state != ClaimState.OPEN:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} claim is not OPEN")
-		if gl.message_raw["datetime"] < claim.deadline:
+		if not _is_deadline_passed(claim.deadline, gl.message_raw["datetime"]):
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} deadline has not passed yet")
 		if claim.deadline_fetched_at != "":
 			# Immutability guard: once written, never overwritten by any path.
@@ -2201,20 +2276,20 @@ class AlphaCourt(gl.Contract):
 
 		if claim.claim_type == CLAIM_TYPE_RELATIVE_PERFORMANCE:
 			(price_a, price_b), fetched_at = _fetch_prices_with_consensus(
-				[claim.asset, claim.asset_b], self.surf_api_key, self.surf_base_url
+				[claim.asset, claim.asset_b], self.surf_api_key, self.surf_base_url, target_time=claim.deadline
 			)
 			claim.deadline_price_atto = u256(int(round(price_a * ATTO)))
 			claim.deadline_price_b_atto = u256(int(round(price_b * ATTO)))
 			claim.deadline_fetched_at = fetched_at
 		elif claim.claim_type == CLAIM_TYPE_FUNDAMENTALS_THRESHOLD:
 			value, fetched_at = _fetch_fundamentals_with_consensus(
-				claim.asset, claim.metric, self.surf_api_key, self.surf_base_url
+				claim.asset, claim.metric, self.surf_api_key, self.surf_base_url, target_time=claim.deadline
 			)
 			claim.deadline_price_atto = _encode_fundamentals_value(value)
 			claim.deadline_fetched_at = fetched_at
 		else:
 			price, fetched_at = _fetch_price_with_consensus(
-				claim.asset, self.surf_api_key, self.surf_base_url
+				claim.asset, self.surf_api_key, self.surf_base_url, target_time=claim.deadline
 			)
 			claim.deadline_price_atto = u256(int(round(price * ATTO)))
 			claim.deadline_fetched_at = fetched_at
@@ -2285,15 +2360,13 @@ class AlphaCourt(gl.Contract):
 		confirmed after this contract shipped, settled that explicitly:
 		bond is returned to the filer on SETTLED, or forfeited and split
 		EVENLY (not proportionally) across all original stakers on
-		REFUNDED -- see _distribute_bond_evenly. An earlier version of this
-		function took an `extra_losing_pool_atto` parameter to fold a
-		forfeited bond in here; removed once the spec confirmed that
-		guess was backwards (see header's "spec correction" note).
-		If nobody staked on the winning side, there is no one to pay --
-		any losing-side stakes simply remain in the contract's balance (no
-		refund mechanism is specified for this edge case; not invented
-		here). That empty path still marks paid so retry_payout cannot
-		later succeed as a silent no-op.
+		REFUNDED -- see _distribute_bond_evenly.
+		
+		Defined refund path when winning side has no stakers:
+		If nobody staked on the winning side (winning_pool == 0), all
+		deposited stakes are refunded to their original stakers via
+		_refund_all_stakes so that 100% of deposited funds are accounted
+		for and returned to depositors rather than stranded in the contract.
 		"""
 		if claim.paid:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} claim already paid")
@@ -2311,6 +2384,11 @@ class AlphaCourt(gl.Contract):
 		)
 
 		if winning_pool == 0:
+			# Defined refund path when the winning side has no stakers:
+			# Refund all deposited stakes on the claim so that 100% of deposited
+			# funds are accounted for and returned, preventing funds from being
+			# stranded in the contract.
+			self._refund_all_stakes(claim)
 			claim.paid = True
 			self.claims[claim.claim_id] = claim
 			return

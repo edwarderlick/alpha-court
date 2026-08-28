@@ -69,14 +69,14 @@ Contracts can't be upgraded in place, so each fix above meant a fresh deployment
 2. Others **stake 1–10 GEN** FOR or AGAINST.
 3. After the deadline, anyone (in practice the keeper) calls `lock_deadline_evidence`. Staking closes. State is **EVIDENCE_LOCKED**.
 4. `resolve_verdict` runs a leader verdict + validator check on the locked snapshots.
-   - Decisive **HELD** or **BROKEN** → **RESOLVED**. Passport records a win/loss. Keeper native-sends winners.
+   - Decisive **HELD** or **BROKEN** → **RESOLVED**. Passport records a win/loss. Contract pays winners via `emit_transfer`.
    - No single side → **CONTESTED**. Stakes stay locked.
 5. **CONTESTED** has a **48-hour** window from `contested_at`.
    - File an appeal with **exactly** the stored bond (25% of the pool, clamped 1–5 GEN) → **APPEAL_PENDING**.
-   - No appeal → `expire_appeal` → **REFUNDED**. Keeper native-sends original stakes back.
+   - No appeal → `expire_appeal` → **REFUNDED**. Contract refunds original stakes via `emit_transfer`.
 6. **APPEAL_PENDING** is a second consensus round on the same locked snapshots (never re-fetched).
-   - Decisive verdict → **SETTLED** / **RESOLVED**. Bond returns to the filer. Keeper pays winners + bond.
-   - Still no agreement → **NO_AGREEMENT** / **REFUNDED**. Bond is forfeited and split evenly across original staker addresses. Keeper native-sends stakes + shares.
+   - Decisive verdict → **SETTLED** / **RESOLVED**. Bond returns to the filer. Contract pays winners + returns bond via `emit_transfer`.
+   - Still no agreement → **NO_AGREEMENT** / **REFUNDED**. Bond is forfeited and split evenly across original staker addresses. Contract refunds stakes + bond shares via `emit_transfer`.
    - One dispute cycle. No third round.
 
 ---
@@ -98,17 +98,14 @@ flowchart LR
     C[Alpha Court contract]
     V[Validators]
   end
-  KW[Keeper EOA]
 
   B --> UI
-  W -->|sign writes| C
+  W -->|deposit GEN & sign writes| C
   UI --> API
   API -->|read / demo write| C
-  K -->|permissionless writes| C
+  K -->|clock settlement writes| C
   V --> C
-  C -->|who won / how much| K
-  K -->|native GEN send| KW
-  KW -->|EOA to EOA| W
+  C -->|contract emit_transfer payouts & refunds| W
 ```
 
 ### State machine

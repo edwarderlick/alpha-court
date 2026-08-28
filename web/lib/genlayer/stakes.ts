@@ -9,7 +9,7 @@ import {
   isLegacyClaim,
   originOf,
 } from "../legacy-claim-ids";
-import { attoToGenString } from "./atto";
+import { attoToGenString, genToAtto } from "./atto";
 import { mapPool } from "./pool";
 import { payoutAddressesForClaim, payoutsFor, type PayoutTransfer } from "./payouts";
 import { hashDelete, hashLoad, hashSet, parseField } from "../persist";
@@ -208,6 +208,34 @@ async function buildRow(
         ? transfers.find((t) => t.kind === "refund") ?? null
         : null;
   const credited = payoutRow?.credited === true;
+
+  let payout: string | null = null;
+  let payoutAtto: string | null = null;
+  if (outcome === "lost") {
+    payout = "0";
+    payoutAtto = "0";
+  } else if (credited && payoutRow) {
+    payout = payoutRow.value ?? null;
+    payoutAtto = payoutRow.valueAtto ?? null;
+  } else if (outcome === "won") {
+    try {
+      const winPoolAtto = genToAtto(winner === "for" ? claim.stake_for_total : claim.stake_against_total);
+      const losePoolAtto = genToAtto(winner === "for" ? claim.stake_against_total : claim.stake_for_total);
+      const userStake = BigInt(amountAtto);
+      if (winPoolAtto > 0n && userStake > 0n) {
+        const calcAtto = userStake + (userStake * losePoolAtto) / winPoolAtto;
+        payoutAtto = calcAtto.toString();
+        payout = attoToGenString(calcAtto);
+      }
+    } catch {
+      payout = null;
+      payoutAtto = null;
+    }
+  } else if (outcome === "refunded") {
+    payoutAtto = amountAtto;
+    payout = attoToGenString(amountAtto);
+  }
+
   return {
     claim_id: claim.claim_id,
     title: claimTitle(claim),
@@ -219,8 +247,8 @@ async function buildRow(
     state: claim.state,
     consensus_result: claim.consensus_result,
     outcome,
-    payout: outcome === "lost" ? "0" : credited ? payoutRow?.value ?? null : null,
-    payoutAtto: outcome === "lost" ? "0" : credited ? payoutRow?.valueAtto ?? null : null,
+    payout,
+    payoutAtto,
     payoutTx: payoutRow?.txHash ?? null,
     payoutKind: payoutRow?.kind ?? null,
     origin_contract: claim.origin_contract,

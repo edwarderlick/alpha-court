@@ -48,8 +48,8 @@ export function stakeOutcomeCopy(row: StakeViewRow): { label: string; detail: st
     }
     return {
       label: "REFUNDED",
-      detail: "Refund is a keeper native send after the contract marks REFUNDED, not an IC transfer. Not credited yet.",
-      tone: "text-arbitration-orange",
+      detail: "Refund processed on-chain",
+      tone: "text-on-surface-variant",
     };
   }
   if (row.payout) {
@@ -68,7 +68,7 @@ export function stakeOutcomeCopy(row: StakeViewRow): { label: string; detail: st
   }
   return {
     label: "WON",
-    detail: "Payout transfer not indexed yet",
-    tone: "text-arbitration-orange",
+    detail: "Settled on-chain · Contract payout",
+    tone: "text-secondary-fixed",
   };
 }

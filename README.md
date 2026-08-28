@@ -129,12 +129,12 @@ stateDiagram-v2
 ```mermaid
 flowchart TD
   T[runKeeperTick] --> L[OPEN + deadline passed → lock_deadline_evidence]
-  L --> R[EVIDENCE_LOCKED → resolve_verdict + credit winners]
-  R --> E[CONTESTED + 48h elapsed → expire_appeal + credit refunds]
+  L --> R[EVIDENCE_LOCKED → resolve_verdict + index winner payouts]
+  R --> E[CONTESTED + 48h elapsed → expire_appeal + index refunds]
   E --> A[APPEAL_PENDING → resolve_appeal]
   A --> S{Result}
-  S -->|RESOLVED / SETTLED| W[credit winners + return bond]
-  S -->|REFUNDED| F[credit refunds + even bond split]
+  S -->|RESOLVED / SETTLED| W[index winner payouts + bond return]
+  S -->|REFUNDED| F[index refunds + even bond split]
   F --> D[Drain: any already-REFUNDED claim still unpaid]
   W --> D
   E --> D
@@ -162,6 +162,8 @@ On a long-lived Node process (`next dev` / `next start`), the keeper also runs `
 ---
 
 ## Payout authority and deadline enforcement
+
+The currently exported `creditResolvedWinners` / `creditRefundedStakers` are observation-only (`return []`); the contract pays via `emit_transfer`.
 
 Real steward review, two findings, both fixed:
 
@@ -230,7 +232,7 @@ alpha-court/
 
 - Node 20+
 - Python 3.12+
-- A funded Studionet account if you want keeper sends or demo writes
+- A funded Studionet account if you want keeper writes or demo writes
 
 ### App
 
@@ -280,9 +282,9 @@ Copy `web/.env.example`. **Do not put real keys in git or in this README.**
 |---|---|---|
 | `ALPHA_COURT_CONTRACT_ADDRESS` | server | Contract for reads and keeper writes. **Required at build.** |
 | `NEXT_PUBLIC_ALPHA_COURT_CONTRACT_ADDRESS` | client | Same address for wallet-signed writes. **Required at build.** |
-| `NEXT_PUBLIC_TREASURY_ADDRESS` | client | Published EOA for stake/bond transfers. Not a secret. |
+| `NEXT_PUBLIC_TREASURY_ADDRESS` | client | Court itself (treasury SELF) for stake/bond transfers. Not an EOA. Not a secret. |
 | `NEXT_PUBLIC_GENLAYER_NETWORK` | client | `studionet` (default), `localnet`, `testnetAsimov`, `testnetBradbury` |
-| `ALPHA_COURT_SIGNER_PRIVATE_KEY` | server | Funded EOA for keeper native sends and optional demo signing |
+| `ALPHA_COURT_SIGNER_PRIVATE_KEY` | server | Funded Studionet account for keeper writes (lock/resolve/expire) and optional demo signing. Does not send payout GEN. |
 | `ALPHA_COURT_SIGNER_ADDRESS` | server | Optional public keeper address |
 | `SURF_API_KEY` | server | Display-only price/metric reads |
 | `ALLOW_DEMO_SIGNING` | server | Must be `true` for unsigned server writes |
@@ -317,7 +319,7 @@ Pushes to `main` deploy production via [`.github/workflows/deploy.yml`](./.githu
 - Retired-court unpaid winners (claims 18–19, 21, 24–30, 32–33 on `0xd3cD69…`) were **not** all auto-repaid. Claim 31 was made whole with a keeper native send.
 - There has been **no committed `REFUNDED` outcome** on either court as of the refund-path audit. The drain pass exists so a future refund cannot sit unpaid.
 - **A real payout-key collision was found and fixed.** The payouts book's "already paid?" check matched on bare `claim_id` and treated a missing `originContract` as an automatic pass. Claim ids restart from 1 on every redeploy, so an old, unrelated payout row could satisfy the check for a same-numbered claim on a different court (confirmed real: a 2026-08-20 row was silently blocking claim #19's real payout on the second deployment, created three days later). Fixed in `web/lib/genlayer/payouts.ts` — the origin check now fails closed, and existing rows are backfilled with their real origin (from the transaction's own on-chain timestamp) the first time they're read.
-- **`GET /api/claims/:id` was an empty HTTP 500 on production (~4.6s, empty body).** Confirmed live against `https://alpha-court.vercel.app`: `/api/keeper/tick` (no Studio read) was 200, `/cases/1` HTML rendered, and both `/api/claims/1` and `/api/claims` died with no JSON. Root cause: the route handler called Next `connection()` (an RSC primitive) and then an unbounded Studio `get_claim`; Vercel Hobby killed the invocation before the existing `catch` could write a body. The one-id handler now skips `connection()`, bounds Redis/Studio reads, and always returns JSON. `/cases/:id` had the same unbounded RSC read and flashed the global error boundary for new claims; it is bounded the same way. Staking/live poll also fall back to a browser-side Studio `get_claim`. **Remaining platform limit:** a Hobby function cannot complete `list_claims` + per-id `get_claim` against Studio. `GET /api/claims` now serves the Redis book only and always returns JSON (`claims: []` if the book is empty) instead of an empty 502. The live docket is still on-chain; Markets can look sparse until the book is populated by one-id reads or the keeper.
+- **`GET /api/claims/:id` was an empty HTTP 500 on production (~4.6s, empty body).** Confirmed live against `https://alpha-court.vercel.app`: `/api/keeper/tick` (no Studio read) was 200, `/cases/1` HTML rendered, and both `/api/claims/1` and `/api/claims` died with no JSON. Root cause: the route handler called Next `connection()` (an RSC primitive) and then an unbounded Studio `get_claim`; Vercel Hobby killed the invocation before the existing `catch` could write a body. The one-id handler now skips `connection()`, bounds Redis/Studio reads, and always returns JSON. `/cases/:id` had the same unbounded RSC read and flashed the global error boundary for new claims; it is bounded the same way. Staking/live poll also fall back to a browser-side Studio `get_claim`. **Remaining platform limit:** a Hobby function cannot complete `list_claims` + per-id `get_claim` against Studio. `GET /api/claims` now serves the Redis book only and always returns JSON (`claims: []` if the book is empty) instead of an empty 502. A real Redis outage returns `503` with `degraded:true`. The live docket is still on-chain; Markets can look sparse until the book is populated by one-id reads or the keeper.
 
 ---
 

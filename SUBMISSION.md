@@ -158,7 +158,7 @@ Full transcript, real claim/tx hashes in this session's record; methodology in `
 
 | Function / path | Can move real GEN? | Guard status |
 |---|---|---|
-| `creditResolvedWinners`, `creditRefundedStakers` (`keeper-credits.ts`) | Yes — the only two callers of `sendAsKeeper` | **Guarded this round** (4a) — `unsafeSignerWithoutRedis` checked before the lock or any chain read. Proven: direct calls with today's exact incident setup (real signer key, disk backend) now return `[]` before touching the chain, for both functions individually |
+| `creditResolvedWinners`, `creditRefundedStakers` (`keeper-credits.ts`) | No — exported functions are observation-only (`return []`); `sendAsKeeper` is not on the live credit path | Historical incident notes remain in §4a. Current exports do not send GEN. |
 | `runKeeperTick` (`keeper.ts`) | Indirectly, via the above | Guarded since round 3 (`keeper-safety.ts`) |
 | `/api/keeper/tick` (GET/POST) | Indirectly, via `runKeeperTick` | Inherits the guard; also bearer-secret gated |
 | `/api/keeper/settle` (POST) | No — calls `writeAsKeeper` only, always with `value` omitted (defaults to 0); confirmed by grep, `writeAsKeeper` has exactly one caller in the whole repo and it never passes a value. A contract-state write (lock/resolve/expire/appeal), not a native send. If it resolves/expires a claim, any real payout is credited separately by the keeper's own retry-drain loop, through the already-guarded functions above, not by this route | Not a send path — no guard needed. Emergency/debug only, disabled unless `KEEPER_SECRET` is set, bearer-secret gated |

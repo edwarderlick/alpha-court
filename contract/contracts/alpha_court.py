@@ -663,6 +663,7 @@ APPEAL_BOND_PCT_DEN = 100
 APPEAL_BOND_FLOOR_ATTO = u256(1 * ATTO)
 APPEAL_BOND_CEIL_ATTO = u256(5 * ATTO)
 APPEAL_WINDOW_HOURS = 48
+UNSETTLED_LOCK_GRACE_HOURS = 24
 
 # Build Prompt 4 collapses UPHELD/OVERTURNED into one outcome -- see
 # header's "architecture consequence" note for why: there is no longer an
@@ -822,6 +823,7 @@ class Claim:
 	contested_at: str
 	second_verdict_text: str
 	appeal_outcome: str
+	appeal_filed_at: str
 
 	# Set True inside _payout_for_claim the moment a payout completes.
 	# retry_payout is permissionless-looking but re-runs this path, and
@@ -1544,6 +1546,11 @@ def _appeal_window_elapsed(contested_at: str, now_str: str) -> bool:
 	return _parse_iso(now_str) >= deadline
 
 
+def _unsettled_lock_grace_elapsed(deadline_str: str, now_str: str) -> bool:
+	expiry = _parse_iso(deadline_str) + datetime.timedelta(hours=UNSETTLED_LOCK_GRACE_HOURS)
+	return _parse_iso(now_str) >= expiry
+
+
 def _build_price_threshold_facts(claim: "Claim") -> str:
 	"""Raw facts for a Price Threshold claim -- no precomputed HELD/BROKEN
 	answer, per Build Prompt 4's principle (see _resolve_verdict_with_
@@ -1938,6 +1945,7 @@ class AlphaCourt(gl.Contract):
 			"contested_at": claim.contested_at,
 			"second_verdict_text": claim.second_verdict_text,
 			"appeal_outcome": claim.appeal_outcome,
+			"appeal_filed_at": claim.appeal_filed_at,
 			"paid": claim.paid,
 			"treasury": self.treasury.as_hex,
 		}
@@ -2152,6 +2160,7 @@ class AlphaCourt(gl.Contract):
 			contested_at="",
 			second_verdict_text="",
 			appeal_outcome="",
+			appeal_filed_at="",
 			paid=False,
 		)
 
@@ -2222,6 +2231,7 @@ class AlphaCourt(gl.Contract):
 			contested_at="",
 			second_verdict_text="",
 			appeal_outcome="",
+			appeal_filed_at="",
 			paid=False,
 		)
 
@@ -2306,6 +2316,7 @@ class AlphaCourt(gl.Contract):
 			contested_at="",
 			second_verdict_text="",
 			appeal_outcome="",
+			appeal_filed_at="",
 			paid=False,
 		)
 
@@ -2376,27 +2387,70 @@ class AlphaCourt(gl.Contract):
 			# Immutability guard: once written, never overwritten by any path.
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} deadline snapshot already locked")
 
-		if claim.claim_type == CLAIM_TYPE_RELATIVE_PERFORMANCE:
-			(price_a, price_b), fetched_at = _fetch_prices_with_consensus(
-				[claim.asset, claim.asset_b], self.surf_api_key, self.surf_base_url, target_time=claim.deadline
-			)
-			claim.deadline_price_atto = u256(int(round(price_a * ATTO)))
-			claim.deadline_price_b_atto = u256(int(round(price_b * ATTO)))
-			claim.deadline_fetched_at = fetched_at
-		elif claim.claim_type == CLAIM_TYPE_FUNDAMENTALS_THRESHOLD:
-			value, fetched_at = _fetch_fundamentals_with_consensus(
-				claim.asset, claim.metric, self.surf_api_key, self.surf_base_url, target_time=claim.deadline
-			)
-			claim.deadline_price_atto = _encode_fundamentals_value(value)
-			claim.deadline_fetched_at = fetched_at
-		else:
-			price, fetched_at = _fetch_price_with_consensus(
-				claim.asset, self.surf_api_key, self.surf_base_url, target_time=claim.deadline
-			)
-			claim.deadline_price_atto = u256(int(round(price * ATTO)))
-			claim.deadline_fetched_at = fetched_at
+		try:
+			if claim.claim_type == CLAIM_TYPE_RELATIVE_PERFORMANCE:
+				(price_a, price_b), fetched_at = _fetch_prices_with_consensus(
+					[claim.asset, claim.asset_b], self.surf_api_key, self.surf_base_url, target_time=claim.deadline
+				)
+				claim.deadline_price_atto = u256(int(round(price_a * ATTO)))
+				claim.deadline_price_b_atto = u256(int(round(price_b * ATTO)))
+				claim.deadline_fetched_at = fetched_at
+			elif claim.claim_type == CLAIM_TYPE_FUNDAMENTALS_THRESHOLD:
+				value, fetched_at = _fetch_fundamentals_with_consensus(
+					claim.asset, claim.metric, self.surf_api_key, self.surf_base_url, target_time=claim.deadline
+				)
+				claim.deadline_price_atto = _encode_fundamentals_value(value)
+				claim.deadline_fetched_at = fetched_at
+			else:
+				price, fetched_at = _fetch_price_with_consensus(
+					claim.asset, self.surf_api_key, self.surf_base_url, target_time=claim.deadline
+				)
+				claim.deadline_price_atto = u256(int(round(price * ATTO)))
+				claim.deadline_fetched_at = fetched_at
+		except Exception as e:
+			err_str = str(e)
+			if ERROR_EXTERNAL in err_str:
+				# Deterministic external failure: no qualifying data point at or before deadline,
+				# or unparseable/missing payload timestamps. Re-trying will not fix this.
+				# Terminal exit: refund all deposited stakes and set state to REFUNDED, paid=True.
+				claim.state = ClaimState.REFUNDED
+				self.claims[claim_id] = claim
+				self._refund_all_stakes(claim)
+				self._record_passport(claim, "")
+				claim.paid = True
+				self.claims[claim_id] = claim
+				return
+			# Nondeterministic / transient errors (e.g. [TRANSIENT] 5xx) must still raise
+			# so lock can be retried when the external service is available.
+			raise
 
 		claim.state = ClaimState.EVIDENCE_LOCKED
+		self.claims[claim_id] = claim
+
+	@gl.public.write
+	def expire_unsettled(self, claim_id: str) -> None:
+		"""
+		Escape hatch for claims that remain unsettled in OPEN state after the deadline
+		and grace period (UNSETTLED_LOCK_GRACE_HOURS = 24h).
+		Permissionless: anyone may call it once the grace window has elapsed.
+		Transitions state to REFUNDED, refunds all deposited stakes to depositors,
+		records passport history, and sets paid=True so custody cannot strand funds forever.
+		"""
+		claim = self._get_claim(claim_id)
+		if claim.state != ClaimState.OPEN:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} claim is not OPEN (current state: {claim.state})")
+		if not _is_deadline_passed(claim.deadline, gl.message_raw["datetime"]):
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} claim deadline has not passed yet")
+		if not _unsettled_lock_grace_elapsed(claim.deadline, gl.message_raw["datetime"]):
+			raise gl.vm.UserError(
+				f"{ERROR_EXPECTED} unsettled lock grace period ({UNSETTLED_LOCK_GRACE_HOURS}h) has not elapsed"
+			)
+
+		claim.state = ClaimState.REFUNDED
+		self.claims[claim_id] = claim
+		self._refund_all_stakes(claim)
+		self._record_passport(claim, "")
+		claim.paid = True
 		self.claims[claim_id] = claim
 
 	def _pay_native(self, to: Address, amount: u256) -> None:
@@ -2737,6 +2791,7 @@ class AlphaCourt(gl.Contract):
 			)
 
 		claim.appeal_filer = gl.message.sender_address
+		claim.appeal_filed_at = gl.message_raw["datetime"]
 		claim.state = ClaimState.APPEAL_PENDING
 		self.claims[claim_id] = claim
 		self._mark_tx_spent(hash_norm)
@@ -2793,6 +2848,8 @@ class AlphaCourt(gl.Contract):
 			self._refund_all_stakes(claim)
 			self._distribute_bond_evenly(claim)
 			self._record_passport(claim, "")
+			claim.paid = True
+			self.claims[claim_id] = claim
 			return
 
 		claim.appeal_outcome = APPEAL_OUTCOME_SETTLED
@@ -2828,3 +2885,59 @@ class AlphaCourt(gl.Contract):
 		self.claims[claim_id] = claim
 		self._refund_all_stakes(claim)
 		self._record_passport(claim, "")
+		claim.paid = True
+		self.claims[claim_id] = claim
+
+	@gl.public.write
+	def expire_unresolved_appeal(self, claim_id: str) -> None:
+		"""
+		CONTESTED -> APPEAL_PENDING -> REFUNDED if appeal is not resolved within
+		APPEAL_WINDOW_HOURS (48h) after being filed.
+		Permissionless: anyone may call once the window has elapsed.
+		Refunds all deposited stakes, distributes the appeal bond evenly to stakers
+		(or 100% to filer if no other stakers), records passport history, and sets paid=True.
+		"""
+		claim = self._get_claim(claim_id)
+		if claim.state != ClaimState.APPEAL_PENDING:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} claim is not APPEAL_PENDING")
+		if not claim.appeal_filed_at:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} appeal_filed_at timestamp missing")
+		if not _appeal_window_elapsed(claim.appeal_filed_at, gl.message_raw["datetime"]):
+			raise gl.vm.UserError(
+				f"{ERROR_EXPECTED} appeal resolution window ({APPEAL_WINDOW_HOURS}h) has not elapsed"
+			)
+
+		claim.appeal_outcome = APPEAL_OUTCOME_NO_AGREEMENT
+		claim.state = ClaimState.REFUNDED
+		self.claims[claim_id] = claim
+		self._refund_all_stakes(claim)
+		self._distribute_bond_evenly(claim)
+		self._record_passport(claim, "")
+		claim.paid = True
+		self.claims[claim_id] = claim
+
+	@gl.public.write
+	def retry_refund(self, claim_id: str) -> None:
+		"""Re-run the REFUNDED payout sends if they have not already completed.
+
+		Needed when an emit_transfer child failed or needs retry. Only the
+		claim poster or the keeper may call it. Not silently idempotent:
+		a claim with paid=True is rejected with a UserError.
+		"""
+		claim = self._get_claim(claim_id)
+		if claim.state != ClaimState.REFUNDED:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} claim is not REFUNDED")
+		if claim.paid:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} claim already paid")
+		sender = gl.message.sender_address
+		if sender != claim.poster and sender != self.keeper:
+			raise gl.vm.UserError(
+				f"{ERROR_EXPECTED} only the claim poster or keeper may retry refund"
+			)
+
+		self._refund_all_stakes(claim)
+		if claim.appeal_filer != ZERO_ADDRESS and claim.appeal_bond_atto > 0:
+			if claim.appeal_outcome == APPEAL_OUTCOME_NO_AGREEMENT or claim.appeal_outcome == "":
+				self._distribute_bond_evenly(claim)
+		claim.paid = True
+		self.claims[claim_id] = claim

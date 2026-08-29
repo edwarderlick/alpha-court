@@ -82,7 +82,7 @@ The weeks-old belief that Studionet cannot IC→EOA was a type-handling bug, iso
 | Deposit / treasury | the court itself (`SELF`) |
 | Retired courts | `0xd3cD69…`, `0x8b2fF616…`, `0x22Cf7A9e…`, `0xF9Df5e7b…`, `0x219e7531…`, `0x1b8Fc1a2…` |
 | Network | studionet, chain `61999` |
-| Direct tests | 119 passed, 0 failed in 11.77s (`pytest test/direct/ -v` from `contract/`) |
+| Direct tests | 126 passed, 0 failed in 10.03s (`pytest test/direct/ -v` from `contract/`) |
 | Deploy tx (live court) | `0x71326b5aebebd20c045ed0037a153a67ba1e0dfa63424f68576cba9220c0b4e1` |
 
 **Two full lifecycles on a prior court, preserved as §4's cache-deletion proof** (not the current live address; the current court's own cycle is in §2 / §5). Real txs, real ~90-second wait, real leader + validator consensus — not a direct-mode mock:
@@ -209,7 +209,7 @@ The design is custodial on purpose: the contract holds the GEN and pays it out. 
 
 That matches the independently-known fields for that send. Only then was the court rewritten.
 
-**Adversarial direct tests** (`test/direct/test_tx_verification.py`, `test_retry_payout_idempotence.py`, `test_self_treasury.py`, plus payout/refund balance assertions in `test_staking.py` / `test_appeals.py`): fabricated/missing hash rejected; wrong recipient rejected; wrong sender rejected; amount below 1 GEN rejected; replay of a consumed hash rejected; a hash whose canonical `to` is a retired treasury is rejected on the new court; late stake reverts on the timestamp check *without* consuming the hash; a genuine matching transfer records the real amount; multiple winners are credited the hand-calculated split; refunds and bond-return credit real balances; a zero losing-pool payout returns the stake and does not error; a second `retry_payout` after a real payout reverts `claim already paid` (not a silent no-op) and does not move GEN; a losing staker cannot retry even if `paid` is forced false in storage; `treasury = SELF` deploys with the contract's own address. Full suite: 119 passed, 0 failed in 11.77s (`pytest test/direct/ -v`).
+**Adversarial direct tests** (`test/direct/test_tx_verification.py`, `test_retry_payout_idempotence.py`, `test_self_treasury.py`, plus payout/refund balance assertions in `test_staking.py` / `test_appeals.py`): fabricated/missing hash rejected; wrong recipient rejected; wrong sender rejected; amount below 1 GEN rejected; replay of a consumed hash rejected; a hash whose canonical `to` is a retired treasury is rejected on the new court; late stake reverts on the timestamp check *without* consuming the hash; a genuine matching transfer records the real amount; multiple winners are credited the hand-calculated split; refunds and bond-return credit real balances; a zero losing-pool payout returns the stake and does not error; a second `retry_payout` after a real payout reverts `claim already paid` (not a silent no-op) and does not move GEN; a losing staker cannot retry even if `paid` is forced false in storage; `treasury = SELF` deploys with the contract's own address. Full suite: 126 passed, 0 failed in 10.03s (`pytest test/direct/ -v`).
 
 **Live cycle on this exact court** (real Studio consensus, not a mock; no `sendAsKeeper`; deposits are bare native sends, so `__receive__` is on the path):
 
@@ -230,14 +230,14 @@ That matches the independently-known fields for that send. Only then was the cou
 
 **What this still does not claim:** the same `emit_transfer` shape is unproven on Testnet Asimov/Bradbury (chain `4221`). The keeper is still the clock that calls lock/resolve/expire.
 
-## 6. Steward Review Resolution (Deadline Evidence, Canonical Parsing, 0-Staker Refund, 100% Fund Conservation)
+## 6. Steward Review Resolution (Deadline Evidence, Canonical Parsing, 0-Staker Refund, Custody Escape Hatches)
 
 **Steward Feedback:**
 > *"make deadline evidence verifiably correspond to the claim's declared time, parse and validate deadlines canonically, and add a defined refund or reallocation path when the winning side has no stakers. Please include focused tests showing that delayed locking cannot change the sampled settlement time and that every terminal payout branch accounts for all deposited funds."*
 
-*Note on deployment status:* These lock, parser, and refund-path changes are implemented in the PR source on branch `steward-declared-time-evidence` (`f2a3aa2`) and verified by direct tests (`contract/test/direct/test_steward_resubmission_fixes.py`); they are not yet the live court bytecode (`0x0312c04c…`), as no Studio redeploy has been done for this resubmission.
+*Note on deployment status:* These lock, parser, custody escape hatches, and refund-path changes are implemented in the PR source on branch `steward-declared-time-evidence` and verified by direct tests (`contract/test/direct/test_steward_resubmission_fixes.py`); they are not yet the live court bytecode (`0x0312c04c…`), as no Studio redeploy has been done for this resubmission.
 
-Every point is addressed in contract logic. Direct test suite pass count: 119 passed, 0 failed in 11.77s (`pytest test/direct/ -v` from `contract/`).
+Every point is addressed in contract logic. Direct test suite pass count: 126 passed, 0 failed in 10.03s (`pytest test/direct/ -v` from `contract/`).
 
 ### 6a. Verifiable Declared-Time Deadline Evidence
 
@@ -266,10 +266,21 @@ In `_payout_for_claim`, when `winning_pool == 0`, the contract calls `_refund_al
 
 `_distribute_bond_evenly`: when `unique_stakers` is empty AND `appeal_bond_atto > 0` AND `appeal_filer != ZERO_ADDRESS`, pay 100% of the bond back to the filer (the only depositor). Do not no-op and strand the 1 GEN floor bond. When `unique_stakers` is non-empty, keep the even split.
 
-`contract/test/direct/test_steward_resubmission_fixes.py` covers:
+### 6e. Custody Protection & Escape Hatches (No Stranded GEN)
 
-1. Delayed lock on all three claim types, with a post-deadline `data[0]` trap and `from`/`to` URL requirement; two post-deadline lock times store the same snapshot time and deadline-or-before price.
-2. Single-dict lock payloads: post-deadline single object raises `[EXTERNAL]`; ≤-deadline single object stores the payload point's snapshot time; missing/unparseable timestamp raises `[EXTERNAL]` and never falls back to request deadline.
-3. Canonical parsing matrix (space, missing Z, `+02:00`, unpadded date, empty, past, lowercase z, millis) on create_claim, relative, and fundamentals.
-4. Zero-winner RESOLVED refund.
-5. All 5 original terminal branches, plus SETTLED + winning_pool==0 (stakes refunded + bond to filer) and NO_AGREEMENT + zero original stakers (filer balance += 1 GEN; bond does not remain in the contract).
+To ensure that deposited funds can never sit in contract custody without a working release path:
+1. **Deterministic Lock Evidence Failure Refunds**: If `lock_deadline_evidence` encounters a deterministic `[EXTERNAL]` error (no data point $\le$ deadline or missing/unparseable timestamps), it immediately transitions the claim to `REFUNDED`, refunds 100% of deposited stakes via `_refund_all_stakes`, sets `claim.paid = True`, and returns gracefully rather than remaining `OPEN` forever. Transient 5xx errors still raise so locking can be retried.
+2. **Unsettled Lock Expiry (`expire_unsettled`)**: Adds permissionless `expire_unsettled(claim_id)` with `UNSETTLED_LOCK_GRACE_HOURS = 24`. If a claim remains in `OPEN` state 24 hours after the deadline has passed without evidence being locked, anyone can trigger a refund of all deposited stakes to depositors.
+3. **Unresolved Appeal Expiry (`expire_unresolved_appeal`)**: `file_appeal` records `claim.appeal_filed_at`. If an appeal remains in `APPEAL_PENDING` without being resolved after `APPEAL_WINDOW_HOURS = 48`, anyone can call `expire_unresolved_appeal(claim_id)` to transition to `REFUNDED`, refund all stakes, split the bond evenly (or return to filer if no stakers), record passport history, and mark `claim.paid = True`.
+4. **Refund Retry Path (`retry_refund`)**: `expire_appeal`, `resolve_appeal` NO_AGREEMENT, deterministic lock refund, `expire_unsettled`, and `expire_unresolved_appeal` all set `claim.paid = True`. If a transfer child ever fails, the claim poster or keeper can call `retry_refund(claim_id)`, which re-sends the refunds and sets `paid = True`. A second call reverts with `claim already paid`.
+5. **8-Branch Terminal Payout Accounting Audit**: All 8 terminal payout paths (Normal Win, 0-Winner Refund, Expire Appeal, Settled Appeal, No-Agreement Appeal, Deterministic Lock Failure Refund, Expire Unsettled, Expire Unresolved Appeal) account for 100% of deposited funds.
+
+`contract/test/direct/test_steward_resubmission_fixes.py` tests:
+1. `test_lock_with_no_qualifying_point_refunds_all_stakes`: Post-deadline-only lock points transitions to REFUNDED, returns 100% of stakes, `paid == True`, `deadline_snapshot_at == ""`.
+2. `test_lock_transient_surf_error_does_not_refund`: Surf 5xx TRANSIENT error reverts, keeping claim OPEN for retry.
+3. `test_expire_unsettled_before_grace_reverts`: `expire_unsettled` reverts before deadline + 24h grace.
+4. `test_expire_unsettled_after_grace_refunds_all_stakes`: `expire_unsettled` refunds 100% of stakes after 24h grace.
+5. `test_expire_unresolved_appeal_before_window_reverts`: `expire_unresolved_appeal` reverts before 48h after appeal filing.
+6. `test_expire_unresolved_appeal_after_window_refunds_and_distributes_bond`: `expire_unresolved_appeal` refunds stakes and splits bond after 48h.
+7. `test_retry_refund_sends_once_second_call_reverts`: `retry_refund` performs refunds and sets `paid=True`; second call reverts `claim already paid`. Stranger calls revert.
+8. `test_all_terminal_payout_branches_account_for_all_deposited_funds`: Exhaustive 8-branch accounting test proving exact 100% balance disbursement.

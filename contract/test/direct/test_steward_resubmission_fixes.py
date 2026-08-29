@@ -296,11 +296,13 @@ def test_delayed_locking_fundamentals_selects_point_at_or_before_deadline(
 
 
 def test_lock_rejects_single_dict_payload_after_deadline(direct_deploy, direct_vm):
-	"""A single dict payload (non-list) after the deadline must be rejected with [EXTERNAL]
-	and must not freeze post-deadline price 9999."""
+	"""A single dict payload (non-list) after the deadline is a deterministic failure:
+	it must transition to REFUNDED, refund all stakes, and must not freeze post-deadline price 9999."""
 	mock_live_trap(direct_vm, "ETH/USD", 9999.0)
+	install_payout_and_verdict_hook(direct_vm)
 	c = deploy(direct_deploy)
 	cid = c.create_claim("ETH/USD", "2500.0", "above", FUTURE_DEADLINE)
+	register_stake(c, direct_vm, cid, "for", 2 * ATTO, STAKER_A)
 	force_stored_deadline(c, cid)
 	mock_lock_series(
 		direct_vm,
@@ -308,11 +310,14 @@ def test_lock_rejects_single_dict_payload_after_deadline(direct_deploy, direct_v
 		{"data": {"timestamp": TRAP_POST_DEADLINE, "price": 9999.0}},
 	)
 	set_vm_time(direct_vm, "2026-08-02T00:00:00Z")
-	with pytest.raises(Exception, match=r"\[EXTERNAL\]"):
-		c.lock_deadline_evidence(cid)
-	unlocked = c.get_claim(cid)
-	assert unlocked["state"] == "OPEN"
-	assert unlocked["deadline_snapshot_at"] == ""
+	bal_a_before = balance_of(direct_vm, STAKER_A)
+	c.lock_deadline_evidence(cid)
+	refunded = c.get_claim(cid)
+	assert refunded["state"] == "REFUNDED"
+	assert refunded["paid"] is True
+	assert refunded["deadline_snapshot_at"] == ""
+	assert refunded["deadline_price"] is None
+	assert balance_of(direct_vm, STAKER_A) == bal_a_before + 2 * ATTO
 
 
 def test_lock_accepts_single_dict_payload_at_or_before_deadline(direct_deploy, direct_vm):
@@ -336,11 +341,13 @@ def test_lock_accepts_single_dict_payload_at_or_before_deadline(direct_deploy, d
 
 
 def test_lock_fetched_at_never_falls_back_to_request_deadline(direct_deploy, direct_vm):
-	"""If point timestamp is missing or unparseable, lock must raise [EXTERNAL]
-	and never fall back to request deadline."""
+	"""If point timestamp is missing or unparseable, lock must deterministically fail,
+	transition to REFUNDED, and never fall back to request deadline."""
 	mock_live_trap(direct_vm, "ETH/USD", 9999.0)
+	install_payout_and_verdict_hook(direct_vm)
 	c = deploy(direct_deploy)
 	cid = c.create_claim("ETH/USD", "2500.0", "above", FUTURE_DEADLINE)
+	register_stake(c, direct_vm, cid, "for", 2 * ATTO, STAKER_A)
 	force_stored_deadline(c, cid)
 	mock_lock_series(
 		direct_vm,
@@ -348,11 +355,221 @@ def test_lock_fetched_at_never_falls_back_to_request_deadline(direct_deploy, dir
 		{"data": [{"price": 2800.0}]},
 	)
 	set_vm_time(direct_vm, "2026-08-02T00:00:00Z")
-	with pytest.raises(Exception, match=r"\[EXTERNAL\]"):
+	bal_a_before = balance_of(direct_vm, STAKER_A)
+	c.lock_deadline_evidence(cid)
+	refunded = c.get_claim(cid)
+	assert refunded["state"] == "REFUNDED"
+	assert refunded["paid"] is True
+	assert refunded["deadline_snapshot_at"] == ""
+	assert balance_of(direct_vm, STAKER_A) == bal_a_before + 2 * ATTO
+
+
+def test_lock_with_no_qualifying_point_refunds_all_stakes(direct_deploy, direct_vm):
+	"""Test 1: After deadline, lock mock returns only post-deadline points.
+	lock_deadline_evidence must end REFUNDED, return 100% of deposited stakes,
+	paid True, deadline_snapshot_at empty. Must NOT remain OPEN."""
+	mock_live_trap(direct_vm, "ETH/USD", 9999.0)
+	install_payout_and_verdict_hook(direct_vm)
+	c = deploy(direct_deploy)
+	cid = c.create_claim("ETH/USD", "2500.0", "above", FUTURE_DEADLINE)
+	register_stake(c, direct_vm, cid, "for", 2 * ATTO, STAKER_A)
+	register_stake(c, direct_vm, cid, "against", 3 * ATTO, STAKER_B)
+	force_stored_deadline(c, cid)
+
+	mock_lock_series(
+		direct_vm,
+		"ETH/USD",
+		{"data": [{"timestamp": "2026-08-01T15:00:00Z", "price": 3100.0}]},
+	)
+	set_vm_time(direct_vm, "2026-08-02T00:00:00Z")
+
+	bal_a_before = balance_of(direct_vm, STAKER_A)
+	bal_b_before = balance_of(direct_vm, STAKER_B)
+
+	c.lock_deadline_evidence(cid)
+
+	refunded = c.get_claim(cid)
+	assert refunded["state"] == "REFUNDED"
+	assert refunded["paid"] is True
+	assert refunded["deadline_snapshot_at"] == ""
+	assert refunded["deadline_price"] is None
+	assert balance_of(direct_vm, STAKER_A) == bal_a_before + 2 * ATTO
+	assert balance_of(direct_vm, STAKER_B) == bal_b_before + 3 * ATTO
+
+
+def test_lock_transient_surf_error_does_not_refund(direct_deploy, direct_vm):
+	"""Test 2: Surf 5xx / TRANSIENT still reverts; claim stays OPEN; stakes still in contract."""
+	mock_live_trap(direct_vm, "ETH/USD", 9999.0)
+	c = deploy(direct_deploy)
+	cid = c.create_claim("ETH/USD", "2500.0", "above", FUTURE_DEADLINE)
+	register_stake(c, direct_vm, cid, "for", 2 * ATTO, STAKER_A)
+	force_stored_deadline(c, cid)
+
+	# Mock a 500 error on the lock endpoint
+	pattern = (
+		rf".*market/price\?symbol={re.escape('ETH/USD')}"
+		rf"&from={LOCK_UNIX_FROM}&to={LOCK_UNIX_TO}.*"
+	)
+	direct_vm._web_mocks.insert(
+		0,
+		(
+			re.compile(pattern),
+			{"status": 500, "body": b"Internal Server Error"},
+		),
+	)
+	set_vm_time(direct_vm, "2026-08-02T00:00:00Z")
+
+	bal_a_before = balance_of(direct_vm, STAKER_A)
+	with pytest.raises(Exception, match=r"\[TRANSIENT\]"):
 		c.lock_deadline_evidence(cid)
+
 	unlocked = c.get_claim(cid)
 	assert unlocked["state"] == "OPEN"
-	assert unlocked["deadline_snapshot_at"] == ""
+	assert unlocked["paid"] is False
+	assert balance_of(direct_vm, STAKER_A) == bal_a_before
+
+
+def test_expire_unsettled_before_grace_reverts(direct_deploy, direct_vm):
+	"""Test 3: After deadline, but before deadline + 24h: expire_unsettled reverts."""
+	mock_price(direct_vm, 2000.0)
+	c = deploy(direct_deploy)
+	cid = c.create_claim("ETH/USD", "2500.0", "above", FUTURE_DEADLINE)
+
+	# Before deadline (FUTURE_DEADLINE is in the year 2999)
+	with pytest.raises(Exception, match="deadline has not passed yet"):
+		c.expire_unsettled(cid)
+
+	# Set deadline to created_at (deadline passed, but 0 hours < 24h grace)
+	claim = c.claims[cid]
+	claim.deadline = claim.created_at
+	c.claims[cid] = claim
+
+	with pytest.raises(Exception, match="unsettled lock grace period"):
+		c.expire_unsettled(cid)
+
+	claim = c.get_claim(cid)
+	assert claim["state"] == "OPEN"
+
+
+def test_expire_unsettled_after_grace_refunds_all_stakes(direct_deploy, direct_vm):
+	"""Test 4: After deadline + 24h: expire_unsettled transitions OPEN -> REFUNDED,
+	refunds 100% of deposited stakes, paid == True."""
+	mock_price(direct_vm, 2000.0)
+	install_payout_and_verdict_hook(direct_vm)
+	c = deploy(direct_deploy)
+	cid = c.create_claim("ETH/USD", "2500.0", "above", FUTURE_DEADLINE)
+	register_stake(c, direct_vm, cid, "for", 2 * ATTO, STAKER_A)
+	register_stake(c, direct_vm, cid, "against", 4 * ATTO, STAKER_B)
+
+	# Backdate deadline to year 2000 (well past 24h grace)
+	force_stored_deadline(c, cid, "2000-01-01T00:00:00.000Z")
+
+	bal_a_before = balance_of(direct_vm, STAKER_A)
+	bal_b_before = balance_of(direct_vm, STAKER_B)
+
+	c.expire_unsettled(cid)
+
+	refunded = c.get_claim(cid)
+	assert refunded["state"] == "REFUNDED"
+	assert refunded["paid"] is True
+	assert balance_of(direct_vm, STAKER_A) == bal_a_before + 2 * ATTO
+	assert balance_of(direct_vm, STAKER_B) == bal_b_before + 4 * ATTO
+
+
+def test_expire_unresolved_appeal_before_window_reverts(direct_deploy, direct_vm):
+	"""Test 5: In APPEAL_PENDING, but before appeal_filed_at + 48h: expire_unresolved_appeal reverts."""
+	mock_price(direct_vm, 2000.0)
+	c = deploy(direct_deploy)
+	cid = c.create_claim("ETH/USD", "2500.0", "above", FUTURE_DEADLINE)
+	register_stake(c, direct_vm, cid, "for", 2 * ATTO, STAKER_A)
+
+	claim = c.claims[cid]
+	claim.state = "CONTESTED"
+	claim.contested_at = claim.created_at
+	claim.appeal_bond_atto = 1 * ATTO
+	c.claims[cid] = claim
+
+	register_appeal(c, direct_vm, cid, 1 * ATTO, FILER)
+
+	# In APPEAL_PENDING, appeal_filed_at was just set to created_at (0h < 48h window)
+	with pytest.raises(Exception, match="appeal resolution window"):
+		c.expire_unresolved_appeal(cid)
+
+	assert c.get_claim(cid)["state"] == "APPEAL_PENDING"
+
+
+def test_expire_unresolved_appeal_after_window_refunds_and_distributes_bond(
+	direct_deploy, direct_vm
+):
+	"""Test 6: In APPEAL_PENDING, after appeal_filed_at + 48h: expire_unresolved_appeal
+	transitions to REFUNDED, refunds all stakes, distributes bond evenly across stakers, paid == True."""
+	mock_price(direct_vm, 2000.0)
+	install_payout_and_verdict_hook(direct_vm)
+	c = deploy(direct_deploy)
+	cid = c.create_claim("ETH/USD", "2500.0", "above", FUTURE_DEADLINE)
+	register_stake(c, direct_vm, cid, "for", 2 * ATTO, STAKER_A)
+	register_stake(c, direct_vm, cid, "against", 2 * ATTO, STAKER_B)
+
+	claim = c.claims[cid]
+	claim.state = "CONTESTED"
+	claim.contested_at = claim.created_at
+	claim.appeal_bond_atto = 1 * ATTO
+	c.claims[cid] = claim
+
+	register_appeal(c, direct_vm, cid, 1 * ATTO, FILER)
+
+	# Backdate appeal_filed_at to year 2000 (> 48h window)
+	claim = c.claims[cid]
+	claim.appeal_filed_at = "2000-01-01T00:00:00.000Z"
+	c.claims[cid] = claim
+
+	bal_a_before = balance_of(direct_vm, STAKER_A)
+	bal_b_before = balance_of(direct_vm, STAKER_B)
+
+	c.expire_unresolved_appeal(cid)
+
+	refunded = c.get_claim(cid)
+	assert refunded["state"] == "REFUNDED"
+	assert refunded["appeal_outcome"] == "NO_AGREEMENT"
+	assert refunded["paid"] is True
+	# Stakers A and B get 2 GEN stake refund + 0.5 GEN bond share each = 2.5 GEN
+	assert balance_of(direct_vm, STAKER_A) == bal_a_before + int(2.5 * ATTO)
+	assert balance_of(direct_vm, STAKER_B) == bal_b_before + int(2.5 * ATTO)
+
+
+def test_retry_refund_sends_once_second_call_reverts(direct_deploy, direct_vm):
+	"""Test 7: On a REFUNDED claim with paid=False, retry_refund refunds stakes and sets paid=True.
+	Second call reverts with 'claim already paid'."""
+	mock_price(direct_vm, 2000.0)
+	install_payout_and_verdict_hook(direct_vm)
+	c = deploy(direct_deploy)
+	cid = c.create_claim("ETH/USD", "2500.0", "above", FUTURE_DEADLINE)
+	register_stake(c, direct_vm, cid, "for", 2 * ATTO, STAKER_A)
+	register_stake(c, direct_vm, cid, "against", 1 * ATTO, STAKER_B)
+
+	claim = c.claims[cid]
+	claim.state = "REFUNDED"
+	claim.paid = False
+	c.claims[cid] = claim
+
+	bal_a_before = balance_of(direct_vm, STAKER_A)
+	bal_b_before = balance_of(direct_vm, STAKER_B)
+
+	# Stranger (STAKER_B) is rejected
+	direct_vm.sender = STAKER_B
+	with pytest.raises(Exception, match="only the claim poster or keeper may retry refund"):
+		c.retry_refund(cid)
+
+	# Authorized poster (or keeper) succeeds
+	direct_vm.sender = claim.poster.as_bytes
+	c.retry_refund(cid)
+
+	assert balance_of(direct_vm, STAKER_A) == bal_a_before + 2 * ATTO
+	assert balance_of(direct_vm, STAKER_B) == bal_b_before + 1 * ATTO
+	assert c.get_claim(cid)["paid"] is True
+
+	with pytest.raises(Exception, match="claim already paid"):
+		c.retry_refund(cid)
 
 
 # ============================================================================
@@ -402,12 +619,15 @@ def test_zero_stakers_on_winning_side_refunds_all_deposited_funds(direct_deploy,
 
 def test_all_terminal_payout_branches_account_for_all_deposited_funds(direct_deploy, direct_vm):
 	"""
-	Verify 100% fund disbursement and conservation across all terminal payout paths:
+	Test 8: Verify 100% fund disbursement and conservation across all 8 terminal payout paths:
 	Branch 1: Normal RESOLVED win (Proportional pool split)
 	Branch 2: Zero-winner RESOLVED (Full stake refund)
 	Branch 3: REFUNDED via expire_appeal (Full stake refund)
 	Branch 4: SETTLED via resolve_appeal (Proportional win + 100% bond return)
 	Branch 5: NO_AGREEMENT via resolve_appeal (Full stake refund + 100% bond split)
+	Branch 6: REFUNDED via lock_deadline_evidence deterministic external failure (Full stake refund)
+	Branch 7: REFUNDED via expire_unsettled (Full stake refund after 24h grace)
+	Branch 8: REFUNDED via expire_unresolved_appeal (Full stake refund + 100% bond split after 48h)
 	"""
 	mock_price(direct_vm, 2000.0)
 	install_payout_and_verdict_hook(direct_vm, "HELD. Price 3000 exceeds 2500.")
@@ -451,7 +671,7 @@ def test_all_terminal_payout_branches_account_for_all_deposited_funds(direct_dep
 
 	claim3 = c.claims[cid3]
 	claim3.state = "CONTESTED"
-	claim3.contested_at = "2026-08-20T00:00:00Z"
+	claim3.contested_at = "2000-01-01T00:00:00.000Z"
 	c.claims[cid3] = claim3
 
 	bal_a_before = balance_of(direct_vm, STAKER_A)
@@ -469,7 +689,7 @@ def test_all_terminal_payout_branches_account_for_all_deposited_funds(direct_dep
 
 	claim4 = c.claims[cid4]
 	claim4.state = "CONTESTED"
-	claim4.contested_at = "2026-08-28T00:00:00Z"
+	claim4.contested_at = claim4.created_at
 	claim4.appeal_bond_atto = 1 * ATTO
 	c.claims[cid4] = claim4
 
@@ -496,7 +716,7 @@ def test_all_terminal_payout_branches_account_for_all_deposited_funds(direct_dep
 
 	claim5 = c.claims[cid5]
 	claim5.state = "CONTESTED"
-	claim5.contested_at = "2026-08-28T00:00:00Z"
+	claim5.contested_at = claim5.created_at
 	claim5.appeal_bond_atto = 1 * ATTO
 	c.claims[cid5] = claim5
 
@@ -516,6 +736,66 @@ def test_all_terminal_payout_branches_account_for_all_deposited_funds(direct_dep
 
 	c.resolve_appeal(cid5)
 	# Stakers A and B get 2 GEN stake refund + 0.5 GEN bond share each = 2.5 GEN each (100% of 5 GEN deposited)
+	assert balance_of(direct_vm, STAKER_A) == bal_a_before + int(2.5 * ATTO)
+	assert balance_of(direct_vm, STAKER_B) == bal_b_before + int(2.5 * ATTO)
+
+	# --- Branch 6: REFUNDED via lock_deadline_evidence deterministic failure ---
+	cid6 = c.create_claim("ETH/USD", "2500.0", "above", FUTURE_DEADLINE)
+	register_stake(c, direct_vm, cid6, "for", 2 * ATTO, STAKER_A)
+	register_stake(c, direct_vm, cid6, "against", 1 * ATTO, STAKER_B)
+	force_stored_deadline(c, cid6)
+	mock_lock_series(
+		direct_vm,
+		"ETH/USD",
+		{"data": [{"timestamp": "2026-08-01T16:00:00Z", "price": 9999.0}]},
+	)
+	set_vm_time(direct_vm, "2026-08-02T00:00:00Z")
+
+	bal_a_before = balance_of(direct_vm, STAKER_A)
+	bal_b_before = balance_of(direct_vm, STAKER_B)
+
+	c.lock_deadline_evidence(cid6)
+	assert c.get_claim(cid6)["state"] == "REFUNDED"
+	assert balance_of(direct_vm, STAKER_A) == bal_a_before + 2 * ATTO
+	assert balance_of(direct_vm, STAKER_B) == bal_b_before + 1 * ATTO
+
+	# --- Branch 7: REFUNDED via expire_unsettled (24h grace elapsed) ---
+	cid7 = c.create_claim("ETH/USD", "2500.0", "above", FUTURE_DEADLINE)
+	register_stake(c, direct_vm, cid7, "for", 3 * ATTO, STAKER_A)
+	register_stake(c, direct_vm, cid7, "against", 1 * ATTO, STAKER_B)
+	force_stored_deadline(c, cid7, "2000-01-01T00:00:00.000Z")
+
+	bal_a_before = balance_of(direct_vm, STAKER_A)
+	bal_b_before = balance_of(direct_vm, STAKER_B)
+
+	c.expire_unsettled(cid7)
+	assert c.get_claim(cid7)["state"] == "REFUNDED"
+	assert balance_of(direct_vm, STAKER_A) == bal_a_before + 3 * ATTO
+	assert balance_of(direct_vm, STAKER_B) == bal_b_before + 1 * ATTO
+
+	# --- Branch 8: REFUNDED via expire_unresolved_appeal (48h window elapsed) ---
+	cid8 = c.create_claim("ETH/USD", "2500.0", "above", FUTURE_DEADLINE)
+	register_stake(c, direct_vm, cid8, "for", 2 * ATTO, STAKER_A)
+	register_stake(c, direct_vm, cid8, "against", 2 * ATTO, STAKER_B)
+
+	claim8 = c.claims[cid8]
+	claim8.state = "CONTESTED"
+	claim8.contested_at = claim8.created_at
+	claim8.appeal_bond_atto = 1 * ATTO
+	c.claims[cid8] = claim8
+
+	register_appeal(c, direct_vm, cid8, 1 * ATTO, FILER)
+
+	# Backdate appeal_filed_at to year 2000 (> 48h)
+	claim8 = c.claims[cid8]
+	claim8.appeal_filed_at = "2000-01-01T00:00:00.000Z"
+	c.claims[cid8] = claim8
+
+	bal_a_before = balance_of(direct_vm, STAKER_A)
+	bal_b_before = balance_of(direct_vm, STAKER_B)
+
+	c.expire_unresolved_appeal(cid8)
+	assert c.get_claim(cid8)["state"] == "REFUNDED"
 	assert balance_of(direct_vm, STAKER_A) == bal_a_before + int(2.5 * ATTO)
 	assert balance_of(direct_vm, STAKER_B) == bal_b_before + int(2.5 * ATTO)
 

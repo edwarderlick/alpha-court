@@ -1,9 +1,9 @@
 /**
- * Cache-busting check that production is talking to 0x0312c04c, not 0x1b8Fc1a2.
+ * Cache-busting check that production is talking to 0x3112e931, not 0x0312c04c.
  */
 const BASE = "https://alpha-court.vercel.app";
-const NEW = "0x0312c04cA7a5D29025f01d9487e62Fb4fe182C04".toLowerCase();
-const OLD = "0x1b8Fc1a2B16352228f2016DB1BBbeAaBA9192B37".toLowerCase();
+const NEW = "0x3112e93170706119e9e9Bdc552cde57cf596A10b".toLowerCase();
+const OLD = "0x0312c04cA7a5D29025f01d9487e62Fb4fe182C04".toLowerCase();
 const cb = Date.now().toString();
 
 function headers() {

@@ -9,9 +9,9 @@
 
 **Live demo:** [alpha-court.vercel.app](https://alpha-court.vercel.app)
 
-Live Studionet court (chain `61999`): [`0x0312c04cA7a5D29025f01d9487e62Fb4fe182C04`](https://studio.genlayer.com)
+Live Studionet court (chain `61999`): [`0x3112e93170706119e9e9Bdc552cde57cf596A10b`](https://studio.genlayer.com)
 
-*Deployment note:* The live Studionet address above is the currently deployed court (with native contract `emit_transfer` payouts and self-treasury custody live and proven). The declared-time from/to lock sampling, canonical deadline validation, and 0-staker refund mechanics described in this repository represent the source on this branch (`steward-declared-time-evidence`) and will become live on-chain upon a future Studio redeploy.
+*Deployment note:* The live Studionet address above is the currently deployed court with full declared-time from/to lock sampling (payload timestamp $\le$ declared deadline verified), canonical UTC deadline normalization, 0-winner refunds, 0-staker NO_AGREEMENT bond return, custody escape hatches (`expire_unsettled`, `expire_unresolved_lock`, `expire_unresolved_appeal`, `retry_refund`), and native contract `emit_transfer` payouts live and proven on-chain.
 
 Deposit address is the court itself (`treasury = SELF`). Users send GEN here; the contract verifies the transfer by hash and pays winners from that same balance.
 
@@ -24,7 +24,7 @@ Alpha Court is a prediction-market court. A claim is a timed, staked question ab
 - **The loop:** post a claim → others stake GEN for or against it → at the deadline, evidence gets frozen → GenLayer validators reach consensus on HELD or BROKEN (or the claim is CONTESTED and goes to appeal) → winners get paid.
 - **Three claim types today:** a price crossing a threshold, one asset outperforming another, or an on-chain/DeFi metric crossing a threshold.
 - **Lock samples Surf historically.** `lock_deadline_evidence` queries `/market/price` with documented `from`/`to` (1-day lookback) and freezes the last payload point at or before the claim deadline (enforced across both series arrays and single-object payloads; single object after deadline raises `[EXTERNAL]`). `deadline_fetched_at` always records the selected payload point's canonical UTC time, never falling back to the request deadline. Deadlines are canonical UTC (`YYYY-MM-DDTHH:MM:SSZ`). If the winning side has no stakers, deposited stakes are refunded. If a NO_AGREEMENT appeal has zero original stakers, the 1 GEN floor bond returns to the filer. Complete custody protections ensure GEN cannot sit stranded: deterministic lock failures transition to REFUNDED, unsettled claims can be expired after 24h grace (`expire_unsettled`), unresolved locked claims expire after 24h (`expire_unresolved_lock`), unresolved appeals expire after 48h (`expire_unresolved_appeal`), and `retry_refund` provides a permissioned retry path. 128 direct tests cover all 10 terminal branches with exact 0 court-balance delta.
-- **Payouts on Studionet are contract-initiated.** `resolve_verdict` calls `_pay_native`, which `emit_transfer`s to the winner. Real live proof: claim #1 on `0x0312c04c…`, resolve `0x7473f85d…`, child `0x525cab65…` credited 2 GEN to wallet B (38 → 40 GEN). A second `retry_payout` rolls back (`claim already paid`); B's balance stays 40 GEN. No keeper send in that payout. The keeper still exists to *call* lock/resolve/expire on a clock.
+- **Payouts on Studionet are contract-initiated.** `resolve_verdict` calls `_pay_native`, which `emit_transfer`s to the winner. Real live proof: claim #2 on `0x3112e931…`, lock `0xcf9c4de…` (stored `deadline_snapshot_at == 2026-08-29T04:00:00Z` $\le$ declared `2026-08-29T04:35:57Z`), resolve `0x926c5fc…`, child `0x69092e8…` credited 2 GEN to wallet B (38 → 40 GEN). No keeper send in that payout. The keeper still exists to *call* lock/resolve/expire on a clock.
 
 Jump to: [How money moves on Studionet](#how-money-moves-on-studionet) · [What Alpha Court is](#what-alpha-court-is) · [Architecture](#architecture) · [Local development](#local-development) · [Honesty and known limits](#honesty-and-known-limits) · [Roadmap](#roadmap--not-yet-built)
 
@@ -51,6 +51,7 @@ Users send GEN to the court address. The contract re-fetches that transfer (`eth
 | `0xF9Df5e7b7E2119FC8186f7f21Dd37E075a4aCe85` | Custodial payable stakes, retired when the design moved to tx-hash deposits while `_pay_native` was still a no-op. |
 | `0x219e753176D1157bC22376e10d06e4E21E401417` | Tx-hash deposits to a shared EOA treasury; payouts still keeper-sent. Retired when `_pay_native` was un-stubbed and treasury rotated to the contract (`SELF`) so spent hashes cannot replay. |
 | `0x1b8Fc1a2B16352228f2016DB1BBbeAaBA9192B37` | Contract-held payout worked, but `retry_payout` was permissionless with no `paid` flag, so a `RESOLVED` claim could be paid again from pooled deposits. |
+| `0x0312c04cA7a5D29025f01d9487e62Fb4fe182C04` | Self-treasury and emit_transfer proven, but lacked historical from/to evidence sampling, payload timestamp verification, and custody expiry escape hatches. |
 
 Contracts can't be upgraded in place, so each fix above meant a fresh deployment rather than a patch. Claim ids restart from 1 on every new deployment, so every store that looks claims up by id is keyed by `origin_contract::claim_id`, never a bare id — see `web/lib/legacy-claim-ids.ts`.
 

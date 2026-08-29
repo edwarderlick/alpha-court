@@ -11,6 +11,8 @@
 
 Live Studionet court (chain `61999`): [`0x0312c04cA7a5D29025f01d9487e62Fb4fe182C04`](https://studio.genlayer.com)
 
+*Deployment note:* The live Studionet address above is the currently deployed court (with native contract `emit_transfer` payouts and self-treasury custody live and proven). The declared-time from/to lock sampling, canonical deadline validation, and 0-staker refund mechanics described in this repository represent the source on this branch (`steward-declared-time-evidence`) and will become live on-chain upon a future Studio redeploy.
+
 Deposit address is the court itself (`treasury = SELF`). Users send GEN here; the contract verifies the transfer by hash and pays winners from that same balance.
 
 Alpha Court is a prediction-market court. A claim is a timed, staked question about the world. Validators freeze public evidence at the deadline and try to agree **HELD** or **BROKEN**. If they cannot agree, the claim is **CONTESTED**: a 48-hour appeal window, then a second consensus round or a refund.

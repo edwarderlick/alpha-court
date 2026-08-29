@@ -12,10 +12,11 @@ import json
 import re
 
 TEST_TREASURY = "0x1111111111111111111111111111111111111111"
+TEST_TREASURY_BYTES = bytes.fromhex(TEST_TREASURY[2:])
 ATTO = 10**18
 
 
-def apply_native_send(vm, request) -> bytes | None:
+def apply_native_send(vm, request, treasury_bytes: bytes | None = None) -> bytes | None:
 	"""Credit a simulated emit_transfer. Storage-Address EOA sends are
 	EthSend (the proven _ExternalRecipient path). IC-to-IC is PostMessage."""
 	msg = request.get("EthSend") or request.get("PostMessage")
@@ -25,6 +26,8 @@ def apply_native_send(vm, request) -> bytes | None:
 	addr_bytes = addr.as_bytes if hasattr(addr, "as_bytes") else bytes(addr)
 	value = int(msg.get("value", 0))
 	vm._balances[addr_bytes] = vm._balances.get(addr_bytes, 0) + value
+	t_bytes = treasury_bytes or TEST_TREASURY_BYTES
+	vm._balances[t_bytes] = vm._balances.get(t_bytes, 0) - value
 	return b""
 
 _tx_counter = 0
@@ -91,6 +94,8 @@ def mock_studio_tx(
 def register_stake(contract, direct_vm, claim_id, side, amount_atto, sender, tx_hash=None, to: str = TEST_TREASURY):
 	tx_hash = tx_hash or next_tx_hash()
 	mock_studio_tx(direct_vm, sender=sender, value_atto=amount_atto, to=to)
+	t_bytes = bytes.fromhex(to[2:]) if to.startswith("0x") else bytes.fromhex(to)
+	direct_vm._balances[t_bytes] = direct_vm._balances.get(t_bytes, 0) + int(amount_atto)
 	direct_vm.sender = sender
 	if side == "for":
 		contract.stake_for(claim_id, tx_hash)
@@ -103,9 +108,11 @@ def bond_atto(contract, claim_id) -> int:
 	return int(float(contract.get_claim(claim_id)["appeal_bond"]) * ATTO)
 
 
-def register_appeal(contract, direct_vm, claim_id, amount_atto, sender, tx_hash=None):
+def register_appeal(contract, direct_vm, claim_id, amount_atto, sender, tx_hash=None, to: str = TEST_TREASURY):
 	tx_hash = tx_hash or next_tx_hash()
-	mock_studio_tx(direct_vm, sender=sender, value_atto=amount_atto)
+	mock_studio_tx(direct_vm, sender=sender, value_atto=amount_atto, to=to)
+	t_bytes = bytes.fromhex(to[2:]) if to.startswith("0x") else bytes.fromhex(to)
+	direct_vm._balances[t_bytes] = direct_vm._balances.get(t_bytes, 0) + int(amount_atto)
 	direct_vm.sender = sender
 	contract.file_appeal(claim_id, tx_hash)
 	return tx_hash

@@ -61,7 +61,7 @@ import json
 
 import pytest
 
-FUTURE_DEADLINE = "2999-01-01T00:00:00.000Z"
+FUTURE_DEADLINE = "2999-01-01T00:00:00Z"
 
 
 def deploy(direct_deploy):

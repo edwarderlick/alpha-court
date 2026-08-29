@@ -249,8 +249,8 @@ export function AppealPanel({
         </div>
         <p className="font-body-md text-body-md text-on-surface-variant">
           {shownOutcome === "NO_AGREEMENT"
-            ? "The appeal round also failed to reach an agreed verdict. The contract marked REFUNDED. Stakes and the forfeited bond return as a keeper native send, credited on My Stakes only when the wallet balance actually increases."
-            : "Window elapsed with no appeal filed. The contract marked REFUNDED. Stakes return as a keeper native send, credited on My Stakes only when the wallet balance actually increases."}
+            ? "The appeal round also failed to reach an agreed verdict. The contract marked REFUNDED. Stakes and the forfeited bond are refunded directly via emit_transfer from the contract balance."
+            : "Window elapsed with no appeal filed. The contract marked REFUNDED. Stakes are refunded directly via emit_transfer from the contract balance."}
         </p>
       </div>
     );

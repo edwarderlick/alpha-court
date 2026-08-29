@@ -57,9 +57,8 @@ function StakesBody() {
           </h1>
           <p className="font-body-lg text-body-lg text-on-surface-variant max-w-2xl">
             Claims this wallet staked on, with real on-chain amounts. A WON row
-            says Paid only after a keeper native send actually increased this
-            wallet&apos;s balance. Studio IC→EOA transfers are not treated as
-            credits.
+            shows Paid once the court&apos;s native transfer has finalized and
+            settled on-chain.
           </p>
         </section>
 

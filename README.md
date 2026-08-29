@@ -11,6 +11,8 @@
 
 Live Studionet court (chain `61999`): [`0x0312c04cA7a5D29025f01d9487e62Fb4fe182C04`](https://studio.genlayer.com)
 
+*Deployment note:* The live Studionet address above is the currently deployed court (with native contract `emit_transfer` payouts and self-treasury custody live and proven). The declared-time from/to lock sampling, canonical deadline validation, and 0-staker refund mechanics described in this repository represent the source on this branch (`steward-declared-time-evidence`) and will become live on-chain upon a future Studio redeploy.
+
 Deposit address is the court itself (`treasury = SELF`). Users send GEN here; the contract verifies the transfer by hash and pays winners from that same balance.
 
 Alpha Court is a prediction-market court. A claim is a timed, staked question about the world. Validators freeze public evidence at the deadline and try to agree **HELD** or **BROKEN**. If they cannot agree, the claim is **CONTESTED**: a 48-hour appeal window, then a second consensus round or a refund.
@@ -21,6 +23,7 @@ Alpha Court is a prediction-market court. A claim is a timed, staked question ab
 
 - **The loop:** post a claim → others stake GEN for or against it → at the deadline, evidence gets frozen → GenLayer validators reach consensus on HELD or BROKEN (or the claim is CONTESTED and goes to appeal) → winners get paid.
 - **Three claim types today:** a price crossing a threshold, one asset outperforming another, or an on-chain/DeFi metric crossing a threshold.
+- **Lock samples Surf historically.** `lock_deadline_evidence` queries `/market/price` with documented `from`/`to` (1-day lookback) and freezes the last payload point at or before the claim deadline (enforced across both series arrays and single-object payloads; single object after deadline raises `[EXTERNAL]`). `deadline_fetched_at` always records the selected payload point's canonical UTC time, never falling back to the request deadline. Deadlines are canonical UTC (`YYYY-MM-DDTHH:MM:SSZ`). If the winning side has no stakers, deposited stakes are refunded. If a NO_AGREEMENT appeal has zero original stakers, the 1 GEN floor bond returns to the filer. Complete custody protections ensure GEN cannot sit stranded: deterministic lock failures transition to REFUNDED, unsettled claims can be expired after 24h grace (`expire_unsettled`), unresolved locked claims expire after 24h (`expire_unresolved_lock`), unresolved appeals expire after 48h (`expire_unresolved_appeal`), and `retry_refund` provides a permissioned retry path. 128 direct tests cover all 10 terminal branches with exact 0 court-balance delta.
 - **Payouts on Studionet are contract-initiated.** `resolve_verdict` calls `_pay_native`, which `emit_transfer`s to the winner. Real live proof: claim #1 on `0x0312c04c…`, resolve `0x7473f85d…`, child `0x525cab65…` credited 2 GEN to wallet B (38 → 40 GEN). A second `retry_payout` rolls back (`claim already paid`); B's balance stays 40 GEN. No keeper send in that payout. The keeper still exists to *call* lock/resolve/expire on a clock.
 
 Jump to: [How money moves on Studionet](#how-money-moves-on-studionet) · [What Alpha Court is](#what-alpha-court-is) · [Architecture](#architecture) · [Local development](#local-development) · [Honesty and known limits](#honesty-and-known-limits) · [Roadmap](#roadmap--not-yet-built)
@@ -67,16 +70,16 @@ Contracts can't be upgraded in place, so each fix above meant a fresh deployment
 
 1. Someone **posts** a claim. Posting-time evidence is fetched inline. The claim stays **OPEN** for staking until the deadline.
 2. Others **stake 1–10 GEN** FOR or AGAINST.
-3. After the deadline, anyone (in practice the keeper) calls `lock_deadline_evidence`. Staking closes. State is **EVIDENCE_LOCKED**.
+3. After the deadline, anyone (in practice the keeper) calls `lock_deadline_evidence`. Surf historical `from`/`to` is queried; the last point at or before the declared deadline is frozen. Staking closes. State is **EVIDENCE_LOCKED**.
 4. `resolve_verdict` runs a leader verdict + validator check on the locked snapshots.
-   - Decisive **HELD** or **BROKEN** → **RESOLVED**. Passport records a win/loss. Contract pays winners via `emit_transfer`.
+   - Decisive **HELD** or **BROKEN** → **RESOLVED**. Passport records a win/loss. Contract pays winners via `emit_transfer`. If the winning side has no stakers, every deposited stake is refunded.
    - No single side → **CONTESTED**. Stakes stay locked.
 5. **CONTESTED** has a **48-hour** window from `contested_at`.
    - File an appeal with **exactly** the stored bond (25% of the pool, clamped 1–5 GEN) → **APPEAL_PENDING**.
    - No appeal → `expire_appeal` → **REFUNDED**. Contract refunds original stakes via `emit_transfer`.
 6. **APPEAL_PENDING** is a second consensus round on the same locked snapshots (never re-fetched).
    - Decisive verdict → **SETTLED** / **RESOLVED**. Bond returns to the filer. Contract pays winners + returns bond via `emit_transfer`.
-   - Still no agreement → **NO_AGREEMENT** / **REFUNDED**. Bond is forfeited and split evenly across original staker addresses. Contract refunds stakes + bond shares via `emit_transfer`.
+   - Still no agreement → **NO_AGREEMENT** / **REFUNDED**. Bond is forfeited and split evenly across original staker addresses. If nobody staked, the bond returns to the filer instead of sitting in the contract. Contract refunds stakes + bond shares via `emit_transfer`.
    - One dispute cycle. No third round.
 
 ---
@@ -279,7 +282,7 @@ npm test
 Copy `web/.env.example`. **Do not put real keys in git or in this README.**
 
 | Name | Where | Purpose |
-|---|---|---|
+|---|---|
 | `ALPHA_COURT_CONTRACT_ADDRESS` | server | Contract for reads and keeper writes. **Required at build.** |
 | `NEXT_PUBLIC_ALPHA_COURT_CONTRACT_ADDRESS` | client | Same address for wallet-signed writes. **Required at build.** |
 | `NEXT_PUBLIC_TREASURY_ADDRESS` | client | Court itself (treasury SELF) for stake/bond transfers. Not an EOA. Not a secret. |

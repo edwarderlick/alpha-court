@@ -123,9 +123,8 @@ export function ClaimStatusLive({
         <span className="claim-live-stamp">{liveConsensus || "RESOLVED"}</span>
         {!compact ? (
           <p className="claim-live-copy">
-            Verdict is on-chain. GEN payout is a keeper native send after
-            resolve — credited on My Stakes only when the wallet balance
-            actually increases, not an IC→EOA transfer.
+            Verdict is on-chain. GEN payout is sent via emit_transfer directly
+            from the contract balance.
           </p>
         ) : null}
       </div>
@@ -139,8 +138,8 @@ export function ClaimStatusLive({
           <div className="claim-live-label">Refunded</div>
           {!compact ? (
             <p className="claim-live-copy">
-              On-chain state is REFUNDED. GEN returns as a keeper native send,
-              credited on My Stakes only when the wallet balance actually increases.
+              On-chain state is REFUNDED. Stakes are refunded via emit_transfer
+              directly from the contract balance.
             </p>
           ) : null}
         </div>

@@ -2,7 +2,9 @@
 
 For the steward. Product facts only. Live court on GenLayer studionet (chain `61999`): **`0x0312c04cA7a5D29025f01d9487e62Fb4fe182C04`**. Deposit address is the court itself (`treasury = SELF`). Six retired courts, all read-only legacy dockets: `0xd3cD69C30A4e899bA2D346723bffac066543cF97` (pre-payout-fix), `0x8b2fF616d26Cb9bE48f4484BD5F8E7Cdaeca7902` (pre-deterministic-outcome-cross-check), `0x22Cf7A9eA315e6EcE6C2BCBF60F0f656C39CCEE4` (pre-payout-authority/deadline-enforcement fix — see §4), `0xF9Df5e7b7E2119FC8186f7f21Dd37E075a4aCe85` (custodial payable stakes), `0x219e753176D1157bC22376e10d06e4E21E401417` (tx-hash deposits to a shared EOA; payouts still keeper-sent), and `0x1b8Fc1a2B16352228f2016DB1BBbeAaBA9192B37` (contract-held payout worked, retired because permissionless `retry_payout` could pay a `RESOLVED` claim again from pooled deposits).
 
-**Source/bytecode match, verified explicitly, every time:** the live address above was deployed from the exact `alpha_court.py` committed alongside this document — every safeguard described here (§1's deterministic cross-check, §4's on-chain payout enumeration and deadline checks, §5's contract-held deposits with a working, once-only payout) is live in its real bytecode, confirmed by a real end-to-end cycle on this exact deployment, not assumed from the source file alone. Each retired address above was retired specifically because its deployed bytecode predated the fix that superseded it and could not be patched in place (contracts aren't upgradeable) — this document never describes a safeguard on an address whose real bytecode doesn't have it.
+**Live deployment vs. PR source (honest split):**
+- **Live court (`0x0312c04cA7a5D29025f01d9487e62Fb4fe182C04`):** The currently deployed Studionet court. Its bytecode matches the payout authority, `SELF` treasury, on-chain deadline enforcement, and working contract `emit_transfer` payouts proven in §2 and §5 (real transaction hashes listed there). That live settlement cycle still stands.
+- **PR source (§6 on branch `steward-declared-time-evidence` at `f2a3aa2` / PR #1):** Section 6 describes contract logic implemented in source and verified via direct tests (historical from/to lock sampling $\le$ deadline across list/dict envelopes, canonical ISO deadline validation, 0-winner refunds, and 100% terminal branch accounting). This source has **NOT** been deployed to `0x0312c04c…` (contracts are not upgradeable; no Studio redeploy has been performed for this resubmission). §6 is therefore a source + direct-test verification, not a claim about live bytecode. §1–§5 describe the live court deployment; §6 describes the PR source.
 
 ## Prior-art check
 
@@ -24,7 +26,7 @@ For the steward. Product facts only. Live court on GenLayer studionet (chain `61
 
 **Proof:**
 
-`contract/test/direct/test_consensus_gap.py` (7 passed) — the Concord-shaped channel:
+`contract/test/direct/test_consensus_gap.py` (see `test_consensus_gap.py`) — the Concord-shaped channel:
 
 | Test | What it proves |
 |---|---|
@@ -33,7 +35,7 @@ For the steward. Product facts only. Live court on GenLayer studionet (chain `61
 | `test_resolve_verdict_conflicting_words_do_not_pick_a_side` | Mixed HELD+BROKEN prose → `CONTESTED`, empty result, never a guessed side |
 | `test_get_claim_single_source_held_or_empty` | After resolve, `consensus_result` equals a fresh parse of stored `verdict_text` |
 
-`contract/test/direct/test_deterministic_outcome.py` (8 passed) — the FairSplit-shaped arithmetic cross-check, one adversarial test per claim type per round (a leader stating the *wrong* word against the locked numbers) plus a sanity check that a genuinely correct verdict is unaffected:
+`contract/test/direct/test_deterministic_outcome.py` (see `test_deterministic_outcome.py`) — the FairSplit-shaped arithmetic cross-check, one adversarial test per claim type per round (a leader stating the *wrong* word against the locked numbers) plus a sanity check that a genuinely correct verdict is unaffected:
 
 | Test | What it proves |
 |---|---|
@@ -52,7 +54,7 @@ Validators additionally judge the verdict's *reasoning quality* via `prompt_non_
 
 ## 2. Payout mechanism — Studionet pays from the contract
 
-The weeks-old belief that Studionet cannot IC→EOA was a type-handling bug, isolated on a throwaway contract before this bytecode was written:
+The weeks-old belief that Studionet cannot IC→EOA was a type-handling bug, isolated on a throwaway contract before the live court was deployed:
 
 - `gl.get_contract_at(eoa).emit_transfer` is IC-to-IC and still fails (`Contract <eoa> not found`).
 - `_ExternalRecipient(calldata_typed_Address).emit_transfer` raises `SystemError: 2 inval` (payout_probe.ping).
@@ -66,7 +68,7 @@ The weeks-old belief that Studionet cannot IC→EOA was a type-handling bug, iso
 - `resolve_verdict` / `resolve_appeal` / `expire_appeal` call `_pay_native`, which `emit_transfer`s from the contract.
 - The keeper still *calls* those methods on a clock. It does not send the payout GEN (`creditResolvedWinners` / `creditRefundedStakers` are observation-only).
 
-**Live proof, this bytecode, no keeper send:** claim #1 on `0x0312c04c…`, `ETH/USD above 999999` → `RESOLVED BROKEN`, `paid: true`. Wallet B staked 1 GEN against; wallet A staked 1 GEN for. Resolve `0x7473f85da11fab6680e916e00870782224956a0204d26e62eaed0043d37f056e` SUCCESS. Child `0x525cab65a9ef86d2e26f6657eae8d9b7d2177d53ea9f8ca503bfe7b8e93fc89e` to `0xcE0ae5…`, value 2 GEN, status FINALIZED. Wallet B `getBalance` 38 → 40 GEN. A second `retry_payout` from the winner rolled back (`[EXPECTED] only the claim poster or keeper may retry payout`, `0xc88779da…`). A second call from the poster/keeper rolled back (`[EXPECTED] claim already paid`, `0x38887c74…`). Wallet B `getBalance` after both retries: still 40 GEN (delta 0).
+**Live proof on the deployed court, no keeper send:** claim #1 on `0x0312c04c…`, `ETH/USD above 999999` → `RESOLVED BROKEN`, `paid: true`. Wallet B staked 1 GEN against; wallet A staked 1 GEN for. Resolve `0x7473f85da11fab6680e916e00870782224956a0204d26e62eaed0043d37f056e` SUCCESS. Child `0x525cab65a9ef86d2e26f6657eae8d9b7d2177d53ea9f8ca503bfe7b8e93fc89e` to `0xcE0ae5…`, value 2 GEN, status FINALIZED. Wallet B `getBalance` 38 → 40 GEN. A second `retry_payout` from the winner rolled back (`[EXPECTED] only the claim poster or keeper may retry payout`, `0xc88779da…`). A second call from the poster/keeper rolled back (`[EXPECTED] claim already paid`, `0x38887c74…`). Wallet B `getBalance` after both retries: still 40 GEN (delta 0).
 
 **Scope:** this is Studionet (chain `61999`). Testnet Asimov/Bradbury (chain `4221`) still use the GenLayer Chain ghost-contract path the official docs describe. If this project leaves Studionet, `_pay_native` has to be re-proven there. The pinned runner `py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6` is what this Studionet instance accepts; a newer runner exists upstream, and the current official faucet failed to deploy here.
 
@@ -80,7 +82,7 @@ The weeks-old belief that Studionet cannot IC→EOA was a type-handling bug, iso
 | Deposit / treasury | the court itself (`SELF`) |
 | Retired courts | `0xd3cD69…`, `0x8b2fF616…`, `0x22Cf7A9e…`, `0xF9Df5e7b…`, `0x219e7531…`, `0x1b8Fc1a2…` |
 | Network | studionet, chain `61999` |
-| Direct tests | **106 passed, 0 failed** (`pytest test/direct/`) |
+| Direct tests | 128 passed, 0 failed in 11.35s (`pytest test/direct/ -v` from `contract/`) |
 | Deploy tx (live court) | `0x71326b5aebebd20c045ed0037a153a67ba1e0dfa63424f68576cba9220c0b4e1` |
 
 **Two full lifecycles on a prior court, preserved as §4's cache-deletion proof** (not the current live address; the current court's own cycle is in §2 / §5). Real txs, real ~90-second wait, real leader + validator consensus — not a direct-mode mock:
@@ -141,7 +143,7 @@ Full transcript, real claim/tx hashes in this session's record; methodology in `
 
 **4b. Deadline enforcement.** `_stake` and `file_appeal` checked only `claim.state` — `OPEN`/`CONTESTED` respectively — never an independent timestamp. State only changes when someone calls `lock_deadline_evidence`/`expire_appeal`, both permissionless but not automatic, leaving a real window where the real deadline (or the real 48-hour appeal window) had already passed but state hadn't moved. `_stake` now checks `gl.message_raw["datetime"] >= claim.deadline` directly; `file_appeal` now checks `_appeal_window_elapsed(claim.contested_at, ...)` directly — the exact helper `expire_appeal` already used for the opposite direction. Both independent of state.
 
-**Proof** (`contract/test/direct/test_deadline_enforcement.py`, 4 passed — state deliberately left unmoved, deadline/window backdated via direct storage reach-in, the same established pattern `test_appeals.py`'s `force_contested_at` already used):
+**Proof** (`contract/test/direct/test_deadline_enforcement.py`, see `test_deadline_enforcement.py` — state deliberately left unmoved, deadline/window backdated via direct storage reach-in, the same established pattern `test_appeals.py`'s `force_contested_at` already used):
 
 | Test | What it proves |
 |---|---|
@@ -150,7 +152,7 @@ Full transcript, real claim/tx hashes in this session's record; methodology in `
 | `test_file_appeal_after_real_window_elapsed_reverts_even_though_state_is_still_contested` | A late appeal with a real, already-elapsed 48h window reverts on the timestamp check alone, `expire_appeal` never called |
 | `test_file_appeal_within_window_still_succeeds` | Sanity: a genuinely on-time appeal is unaffected |
 
-**Chosen path, then revised twice:** §4 kept keeper-native-send and made recipient/amount verifiable against contract state. That was rejected because payout was still a no-op. §5 first stopped custodying (tx-hash deposits to an EOA). This bytecode takes the *first* half of the original choice as well: `_pay_native` actually pays, and the deposit destination is this contract (`SELF`), so the GEN the contract pays is the GEN users sent.
+**Chosen path, then revised twice:** §4 kept keeper-native-send and made recipient/amount verifiable against contract state. That was rejected because payout was still a no-op. §5 first stopped custodying (tx-hash deposits to an EOA). The deployed court takes the *first* half of the original choice as well: `_pay_native` actually pays, and the deposit destination is this contract (`SELF`), so the GEN the contract pays is the GEN users sent.
 
 **4c. Full audit: every real native-GEN-send path in the codebase, not just the two that caused an incident.** Two duplicate-payment incidents have now happened through two different entry points into the same underlying risk (real signer key + a persistence backend the credit lock can't see across). Rather than assume the fix above closed the whole class, every function anywhere in the repo capable of moving real GEN was found and individually checked.
 
@@ -196,7 +198,7 @@ The design is custodial on purpose: the contract holds the GEN and pays it out. 
 | "Contract-held stakes and appeal bonds must either be released through a working repository-backed payout/refund path **or** the staking design must stop custodying funds it cannot return." | The first option, now that `_pay_native` works on Studionet. Deposits are still tx-hash verified; the destination is this contract (`SELF`), so the GEN paid out is the GEN users sent. |
 | "the contract continues to custody stakes and appeal bonds while its payout function remains a no-op" | Custody is real and so is payout. `resolve_verdict` child `0x525cab65…` paid 2 GEN; winner `getBalance` 38 → 40 GEN. |
 | "the separately funded keeper only reimburses users without releasing the funds held by the contract" | The keeper no longer reimburses. It only triggers lock/resolve/expire. |
-| "Derive or verify every keeper recipient and amount against contract state instead of trusting the unauthenticated stake cache" | Already done in §4. Not re-done. Still true on this bytecode. |
+| "Derive or verify every keeper recipient and amount against contract state instead of trusting the unauthenticated stake cache" | Already done in §4. Not re-done. Still true on the deployed court. |
 | "enforce the staking and appeal deadlines inside the contract methods" | Already done in §4b. Timestamp checks still run *before* the new tx-hash fetch, so a late stake does not consume a genuine transfer hash. Direct tests still pass. |
 | "Add tests showing fabricated or missing cache rows cannot change payouts and that late stakes and appeals revert." | Cache tests remain from §4. New tests in `test/direct/test_tx_verification.py` plus the live cycle below cover fabricated/mismatched hashes, replay, late stakes, and a genuine matching transfer. |
 | "Since the resubmission does not resolve the previous request" | This court is a new deploy. The payable court `0xF9Df5e7b…` and the drain-vulnerable court `0x1b8Fc1a2…` are retired. |
@@ -207,7 +209,7 @@ The design is custodial on purpose: the contract holds the GEN and pays it out. 
 
 That matches the independently-known fields for that send. Only then was the court rewritten.
 
-**Adversarial direct tests** (`test/direct/test_tx_verification.py`, `test_retry_payout_idempotence.py`, `test_self_treasury.py`, plus payout/refund balance assertions in `test_staking.py` / `test_appeals.py`): fabricated/missing hash rejected; wrong recipient rejected; wrong sender rejected; amount below 1 GEN rejected; replay of a consumed hash rejected; a hash whose canonical `to` is a retired treasury is rejected on the new court; late stake reverts on the timestamp check *without* consuming the hash; a genuine matching transfer records the real amount; multiple winners are credited the hand-calculated split; refunds and bond-return credit real balances; a zero losing-pool payout returns the stake and does not error; a second `retry_payout` after a real payout reverts `claim already paid` (not a silent no-op) and does not move GEN; a losing staker cannot retry even if `paid` is forced false in storage; `treasury = SELF` deploys with the contract's own address. Full suite: **106 passed, 0 failed**.
+**Adversarial direct tests** (`test/direct/test_tx_verification.py`, `test_retry_payout_idempotence.py`, `test_self_treasury.py`, plus payout/refund balance assertions in `test_staking.py` / `test_appeals.py`): fabricated/missing hash rejected; wrong recipient rejected; wrong sender rejected; amount below 1 GEN rejected; replay of a consumed hash rejected; a hash whose canonical `to` is a retired treasury is rejected on the new court; late stake reverts on the timestamp check *without* consuming the hash; a genuine matching transfer records the real amount; multiple winners are credited the hand-calculated split; refunds and bond-return credit real balances; a zero losing-pool payout returns the stake and does not error; a second `retry_payout` after a real payout reverts `claim already paid` (not a silent no-op) and does not move GEN; a losing staker cannot retry even if `paid` is forced false in storage; `treasury = SELF` deploys with the contract's own address. Full suite: 126 passed, 0 failed in 10.03s (`pytest test/direct/ -v`).
 
 **Live cycle on this exact court** (real Studio consensus, not a mock; no `sendAsKeeper`; deposits are bare native sends, so `__receive__` is on the path):
 
@@ -228,28 +230,70 @@ That matches the independently-known fields for that send. Only then was the cou
 
 **What this still does not claim:** the same `emit_transfer` shape is unproven on Testnet Asimov/Bradbury (chain `4221`). The keeper is still the clock that calls lock/resolve/expire.
 
-## 6. Steward Review Resolution (Deadline Evidence, Canonical Parsing, 0-Staker Refund, 100% Fund Conservation)
+## 6. Steward Review Resolution (Deadline Evidence, Canonical Parsing, 0-Staker Refund, Custody Escape Hatches)
 
 **Steward Feedback:**
 > *"make deadline evidence verifiably correspond to the claim's declared time, parse and validate deadlines canonically, and add a defined refund or reallocation path when the winning side has no stakers. Please include focused tests showing that delayed locking cannot change the sampled settlement time and that every terminal payout branch accounts for all deposited funds."*
 
-Every point addressed directly in contract logic with 100% test coverage (**111 passed, 0 failed** in `pytest test/direct/`):
+*Note on deployment status:* These lock, parser, custody escape hatches, and refund-path changes are implemented in the PR source on branch `steward-declared-time-evidence` and verified by direct tests (`contract/test/direct/test_steward_resubmission_fixes.py`); they are not yet the live court bytecode (`0x0312c04c…`), as no Studio redeploy has been done for this resubmission.
+
+Every point is addressed in contract logic. Direct test suite pass count: 128 passed, 0 failed in 11.35s (`pytest test/direct/ -v` from `contract/`).
 
 ### 6a. Verifiable Declared-Time Deadline Evidence
-- **Fix:** In `lock_deadline_evidence`, `_fetch_price_with_consensus`, `_fetch_prices_with_consensus`, and `_fetch_fundamentals_with_consensus`, the contract accepts `target_time: str` and queries the Surf API specifically with `&timestamp={claim.deadline}`, recording `claim.deadline_fetched_at = claim.deadline`.
-- **Invariance:** Delayed locking ($T_{\text{lock}} > T_{\text{deadline}}$) queries and freezes the historical evidence as of the declared deadline timestamp. The sampled settlement price/metric and timestamp cannot change regardless of when `lock_deadline_evidence` is executed.
+
+Surf's documented `GET /gateway/v1/market/price` accepts `symbol`, `time_range`, `from`, `to`, `currency`. It does **not** document `timestamp=`. `from`/`to` are Unix seconds or `YYYY-MM-DD` and must be used together. A 1-day window returns 5-minute points.
+
+- **Lock path** (`target_time` = `claim.deadline`): URL is `{base}/market/price?symbol={asset}&from={unix_from}&to={unix_to}` where `unix_to = unix(claim.deadline)` and `unix_from = unix_to - 86400`. Selection applies to both a series array AND a single-object envelope: the selected point must be the latest whose timestamp is **≤ deadline**. If a single object or series has no parseable timestamp or has a timestamp after the deadline, the contract raises `gl.vm.UserError` with `[EXTERNAL]` (deterministic, never falls back to post-deadline points or earliest points). `deadline_fetched_at` is always that selected payload point's canonical ISO timestamp (`YYYY-MM-DDTHH:MM:SSZ`), never the request deadline string blindly assigned. Point timestamps may be unix int/float or ISO strings.
+- **Relative performance:** both assets are queried with the same `from`/`to`; each selects ≤ deadline; shared `fetched_at` is the later of the two selected point ISOs (still strictly ≤ deadline).
+- **Fundamentals:** lock no longer appends `timestamp=`. Selection is the latest series/object point ≤ deadline. The previous fallback that picked the earliest point when none qualified is deleted. Same `[EXTERNAL]` if none ≤ deadline. The selected point's canonical ISO timestamp is persisted as `fetched_at`.
+- **Posting path** (no `target_time`): live `?symbol=` (and current fundamentals URLs without `from`/`to`). `fetched_at` stays `gl.message_raw["datetime"]`. If live `/market/price` returns a list, the MAX-timestamp point is used, not `data[0]`.
+
+Delayed locking cannot change the sampled settlement time or price: a later lock still uses the same `from`/`to` window and still picks the last point ≤ the declared deadline. Tests feed a series whose first element is a post-deadline trap (9999), single-object post-deadline traps, and require the lock URL to contain `from=` and `to=`; a live-only or `timestamp=` implementation cannot match that mock and cannot store 2800.0 at `2026-08-01T11:00:00Z`.
+
+This does **not** claim Surf honors `timestamp=`. It does not.
 
 ### 6b. Canonical Deadline Parsing & Validation
-- **Fix:** Implemented `_parse_and_validate_canonical_deadline(deadline_raw, current_time_str)` across all three claim creation methods (`create_claim`, `create_relative_performance_claim`, `create_fundamentals_claim`).
-- **Enforcement:** Enforces strict ISO-8601 UTC format (`YYYY-MM-DDTHH:MM:SSZ` or with fractional seconds), rejects non-UTC offsets (e.g. `+02:00`), unpadded components (`YYYY-M-D`), missing `T` separator, and non-ISO strings. Validates that the declared deadline is strictly in the future relative to the current block datetime (`gl.message_raw["datetime"]`).
+
+Implemented `_parse_and_validate_canonical_deadline(deadline_raw, current_time_str)` across all three claim creation methods (`create_claim`, `create_relative_performance_claim`, `create_fundamentals_claim`). Enforces strict ISO-8601 UTC, normalizes all valid formats (including fractional seconds and lowercase `z`) to canonical `YYYY-MM-DDTHH:MM:SSZ`, and rejects space delimiters, missing `Z`, non-UTC offsets (e.g. `+02:00`), unpadded dates, empty strings, and past deadlines.
 
 ### 6c. Defined Refund Path When Winning Side Has No Stakers
-- **Fix:** In `_payout_for_claim`, when `winning_pool == 0` (e.g., decisive outcome HELD but stakers only staked AGAINST, or BROKEN with only FOR stakers), the contract immediately executes `self._refund_all_stakes(claim)`.
-- **Invariance:** 100% of all deposited stakes are returned to their depositors via `emit_transfer`. Zero deposited funds remain stranded in contract balance.
 
-### 6d. 100% Fund Accounting Across All Terminal Branches
-`contract/test/direct/test_steward_resubmission_fixes.py` adds focused tests verifying complete fund conservation across every terminal branch:
-1. `test_delayed_locking_samples_declared_deadline_evidence`: Proves delayed locking pins settlement price and timestamp to declared deadline.
-2. `test_create_claim_enforces_canonical_deadline` & `test_relative_and_fundamentals_claim_enforces_canonical_deadline`: Proves canonical parsing and rejection of malformed/past deadlines.
-3. `test_zero_stakers_on_winning_side_refunds_all_deposited_funds`: Proves 100% refund when winning pool has zero stakers.
-4. `test_all_terminal_payout_branches_account_for_all_deposited_funds`: Proves 100% fund disbursement across all 5 terminal payout paths (Normal Win, Zero-Winner Refund, Expired Appeal Refund, Settled Appeal Win + Bond Return, and No-Agreement Stake Refund + Bond Split).
+In `_payout_for_claim`, when `winning_pool == 0`, the contract calls `_refund_all_stakes` and returns. 100% of deposited stakes go back to their depositors. Empty winning pool is no longer a silent leftover-share no-op.
+
+**SETTLED + winning_pool == 0:** AGAINST-only (or FOR-only) stakes are refunded, then `_return_appeal_bond` still returns the bond to the filer, so 100% of stakes+bond leave.
+
+### 6d. 100% Fund Accounting, including 0-staker NO_AGREEMENT
+
+`_distribute_bond_evenly`: when `unique_stakers` is empty AND `appeal_bond_atto > 0` AND `appeal_filer != ZERO_ADDRESS`, pay 100% of the bond back to the filer (the only depositor). Do not no-op and strand the 1 GEN floor bond. When `unique_stakers` is non-empty, keep the even split.
+
+### 6e. Custody Protection & Escape Hatches (No Stranded GEN)
+
+To ensure that deposited funds can never sit in contract custody without a working release path:
+1. **Deterministic Lock Evidence Failure Refunds**: If `lock_deadline_evidence` encounters a deterministic `[EXTERNAL]` error (no data point $\le$ deadline or missing/unparseable timestamps), it immediately transitions the claim to `REFUNDED`, refunds 100% of deposited stakes via `_refund_all_stakes`, sets `claim.paid = True`, and returns gracefully rather than remaining `OPEN` forever. Transient 5xx errors still raise so locking can be retried.
+2. **Unsettled Lock Expiry (`expire_unsettled`)**: Adds permissionless `expire_unsettled(claim_id)` with `UNSETTLED_LOCK_GRACE_HOURS = 24`. If a claim remains in `OPEN` state 24 hours after the deadline has passed without evidence being locked, anyone can trigger a refund of all deposited stakes to depositors.
+3. **Unresolved Locked Evidence Expiry (`expire_unresolved_lock`)**: When evidence is locked, `claim.evidence_locked_at` records the lock timestamp. If an `EVIDENCE_LOCKED` claim remains unresolved after 24 hours (e.g. validator consensus stalls or fails to reach quorum), anyone can call `expire_unresolved_lock(claim_id)` to transition to `REFUNDED`, refund all deposited stakes, record passport history, and set `claim.paid = True`. Evidence snapshots remain preserved.
+4. **Unresolved Appeal Expiry (`expire_unresolved_appeal`)**: `file_appeal` records `claim.appeal_filed_at`. If an appeal remains in `APPEAL_PENDING` without being resolved after `APPEAL_WINDOW_HOURS = 48`, anyone can call `expire_unresolved_appeal(claim_id)` to transition to `REFUNDED`, refund all stakes, split the bond evenly (or return to filer if no stakers), record passport history, and mark `claim.paid = True`.
+5. **Refund Retry Path (`retry_refund`)**: `expire_appeal`, `resolve_appeal` NO_AGREEMENT, deterministic lock refund, `expire_unsettled`, `expire_unresolved_lock`, and `expire_unresolved_appeal` all set `claim.paid = True`. If a transfer child ever fails, the claim poster or keeper can call `retry_refund(claim_id)`, which re-sends the refunds and sets `paid = True`. A second call reverts with `claim already paid`.
+6. **10-Branch Terminal Payout Accounting Audit**: All 10 terminal payout paths account for 100% of deposited funds, proven by checking both staker balance increases and contract/treasury balance delta = 0:
+   - Branch 1: Normal RESOLVED win (Proportional pool split)
+   - Branch 2: Zero-winner RESOLVED (Full stake refund)
+   - Branch 3: REFUNDED via expire_appeal (Full stake refund)
+   - Branch 4: SETTLED via resolve_appeal (Proportional win + 100% bond return)
+   - Branch 5: NO_AGREEMENT via resolve_appeal (Full stake refund + 100% bond split)
+   - Branch 6: REFUNDED via lock_deadline_evidence deterministic external failure (Full stake refund)
+   - Branch 7: REFUNDED via expire_unsettled (Full stake refund after 24h grace)
+   - Branch 8: REFUNDED via expire_unresolved_appeal (Full stake refund + 100% bond split after 48h)
+   - Branch 9: Ugly uneven 3-way winner split with indivisible losing pool remainder (13 GEN total, 1 atto remainder to highest hex winner, every single atto leaves, court extra = 0)
+   - Branch 10: REFUNDED via expire_unresolved_lock (Full stake refund after 24h lock grace, evidence intact, court extra = 0)
+
+`contract/test/direct/test_steward_resubmission_fixes.py` tests:
+1. `test_lock_with_no_qualifying_point_refunds_all_stakes`: Post-deadline-only lock points transitions to REFUNDED, returns 100% of stakes, `paid == True`, `deadline_snapshot_at == ""`.
+2. `test_lock_transient_surf_error_does_not_refund`: Surf 5xx TRANSIENT error reverts, keeping claim OPEN for retry.
+3. `test_expire_unsettled_before_grace_reverts`: `expire_unsettled` reverts before deadline + 24h grace.
+4. `test_expire_unsettled_after_grace_refunds_all_stakes`: `expire_unsettled` refunds 100% of stakes after 24h grace.
+5. `test_expire_unresolved_appeal_before_window_reverts`: `expire_unresolved_appeal` reverts before 48h after appeal filing.
+6. `test_expire_unresolved_appeal_after_window_refunds_and_distributes_bond`: `expire_unresolved_appeal` refunds stakes and splits bond after 48h.
+7. `test_expire_unresolved_lock_before_grace_reverts`: `expire_unresolved_lock` reverts before lock + 24h grace.
+8. `test_expire_unresolved_lock_after_grace_refunds_all_stakes`: `expire_unresolved_lock` refunds 100% of stakes after 24h grace and preserves locked evidence.
+9. `test_retry_refund_sends_once_second_call_reverts`: `retry_refund` performs refunds and sets `paid=True`; second call reverts `claim already paid`. Stranger calls revert.
+10. `test_all_terminal_payout_branches_account_for_all_deposited_funds`: Exhaustive 10-branch accounting test proving exact 100% balance disbursement and 0 retained court balance delta.

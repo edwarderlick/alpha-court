@@ -663,6 +663,7 @@ APPEAL_BOND_PCT_DEN = 100
 APPEAL_BOND_FLOOR_ATTO = u256(1 * ATTO)
 APPEAL_BOND_CEIL_ATTO = u256(5 * ATTO)
 APPEAL_WINDOW_HOURS = 48
+UNSETTLED_LOCK_GRACE_HOURS = 24
 
 # Build Prompt 4 collapses UPHELD/OVERTURNED into one outcome -- see
 # header's "architecture consequence" note for why: there is no longer an
@@ -822,6 +823,8 @@ class Claim:
 	contested_at: str
 	second_verdict_text: str
 	appeal_outcome: str
+	appeal_filed_at: str
+	evidence_locked_at: str
 
 	# Set True inside _payout_for_claim the moment a payout completes.
 	# retry_payout is permissionless-looking but re-runs this path, and
@@ -1008,10 +1011,7 @@ def _parse_and_validate_canonical_deadline(deadline_raw: str, current_time_str: 
 	except Exception:
 		pass
 
-	if has_utc_offset:
-		canonical_iso = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-	else:
-		canonical_iso = text
+	canonical_iso = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 	if cur_dt is not None:
 		if dt <= cur_dt:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} deadline must be in the future")
@@ -1032,6 +1032,85 @@ def _is_deadline_passed(deadline_iso: str, current_time_iso: str) -> bool:
 		return dt_c >= dt_d
 	except Exception:
 		return current_time_iso >= deadline_iso
+
+
+def _iso_to_unix(iso_str: str) -> int:
+	"""Converts a UTC ISO8601 string to integer Unix seconds."""
+	clean = iso_str.strip().rstrip("Z").rstrip("z")
+	if "+" in clean:
+		clean = clean.split("+", 1)[0]
+	if "." in clean:
+		clean = clean.split(".", 1)[0]
+	dt = datetime.datetime.strptime(clean[:19], "%Y-%m-%dT%H:%M:%S").replace(
+		tzinfo=datetime.timezone.utc
+	)
+	return int(dt.timestamp())
+
+
+def _unix_to_canonical_iso(unix_ts: int | float) -> str:
+	"""Converts integer/float Unix seconds to canonical UTC ISO8601."""
+	dt = datetime.datetime.fromtimestamp(float(unix_ts), tz=datetime.timezone.utc)
+	return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_point_timestamp(raw_ts) -> tuple[int, str]:
+	"""Parses a point timestamp from integer/float unix seconds or ISO string,
+	normalizing to integer unix seconds and canonical UTC ISO8601 YYYY-MM-DDTHH:MM:SSZ."""
+	if isinstance(raw_ts, (int, float)):
+		u_sec = int(raw_ts)
+		return u_sec, _unix_to_canonical_iso(u_sec)
+	text = str(raw_ts).strip()
+	if not text:
+		raise gl.vm.UserError(f"{ERROR_EXTERNAL} empty point timestamp")
+	if text.isdigit() or (text.replace(".", "", 1).isdigit() and "." in text):
+		u_sec = int(float(text))
+		return u_sec, _unix_to_canonical_iso(u_sec)
+	u_sec = _iso_to_unix(text)
+	return u_sec, _unix_to_canonical_iso(u_sec)
+
+
+def _select_series_point(points: list[dict], target_unix: int | None) -> tuple[dict, str]:
+	"""Selects the latest series point at or before target_unix.
+	
+	If target_unix is None (posting time), selects the latest available point
+	(or the point itself if no timestamps are present).
+	If target_unix is provided (deadline lock), selects the point with the maximum
+	timestamp that satisfies point_unix <= target_unix. Point MUST have a valid timestamp <= target_unix.
+	Raises ERROR_EXTERNAL if no points qualify (never falls back to post-deadline points).
+	"""
+	if not points:
+		raise gl.vm.UserError(f"{ERROR_EXTERNAL} empty series points list")
+	valid_points: list[tuple[int, str, dict]] = []
+	for pt in points:
+		if not isinstance(pt, dict):
+			continue
+		if "timestamp" in pt and pt["timestamp"] not in (None, ""):
+			try:
+				u_sec, iso = _parse_point_timestamp(pt["timestamp"])
+				if target_unix is not None:
+					if u_sec <= target_unix:
+						valid_points.append((u_sec, iso, pt))
+				else:
+					valid_points.append((u_sec, iso, pt))
+			except Exception:
+				continue
+		else:
+			# If no timestamp field:
+			# At lock time (target_unix is not None), this cannot be verified as <= deadline -> invalid.
+			# At posting time (target_unix is None), accept as snapshot point without timestamp.
+			if target_unix is None:
+				valid_points.append((0, "", pt))
+
+	if not valid_points:
+		if target_unix is not None:
+			raise gl.vm.UserError(
+				f"{ERROR_EXTERNAL} no valid series point at or before deadline"
+			)
+		raise gl.vm.UserError(f"{ERROR_EXTERNAL} no valid series points found")
+
+	valid_points.sort(key=lambda item: item[0])
+	selected_u, selected_iso, selected_pt = valid_points[-1]
+	return selected_pt, selected_iso
 
 
 def _fetch_canonical_tx(tx_hash: str) -> str:
@@ -1107,37 +1186,49 @@ def _fmt_num(value: float | None) -> str | None:
 	return None if value is None else str(value)
 
 
-def _parse_surf_price(payload: dict) -> float:
+def _parse_surf_price(payload: dict | list, target_time: str = "") -> tuple[float, str]:
 	"""
-	Defensive extraction of the spot price from Surf's response envelope.
-	UNVERIFIED FIELD NAMES -- see header note. Tries the documented envelope
-	shape ({"data": ..., "meta": ...}) plus the most common price-field
-	name candidates; raises a clear, deterministic [EXTERNAL] error rather
-	than silently guessing wrong.
+	Defensive extraction of the spot price and timestamp from Surf's response envelope.
+	Normalizes payload into a list of point dicts and selects the point via _select_series_point.
+	When target_time is given (lock), selects the latest point <= target_time from
+	the returned series and extracts its timestamp normalized to canonical ISO8601.
+	When target_time is empty (posting), selects the latest point.
 	"""
 	data = payload.get("data", payload) if isinstance(payload, dict) else payload
-	if isinstance(data, list):
-		data = data[0] if data else {}
-	if not isinstance(data, dict):
+	target_unix = _iso_to_unix(target_time) if target_time else None
+
+	if isinstance(data, dict):
+		points = [data]
+	elif isinstance(data, list):
+		points = data
+	else:
 		raise gl.vm.UserError(f"{ERROR_EXTERNAL} unexpected Surf response shape: {type(data)}")
+
+	selected_point, point_iso = _select_series_point(points, target_unix)
+
 	for key in ("price", "value", "last", "spot_price", "close"):
-		if key in data:
-			return float(data[key])
+		if key in selected_point:
+			return float(selected_point[key]), point_iso
 	raise gl.vm.UserError(
-		f"{ERROR_EXTERNAL} unrecognized Surf price response shape: keys={list(data.keys())}"
+		f"{ERROR_EXTERNAL} unrecognized Surf price response shape: keys={list(selected_point.keys())}"
 	)
 
 
-def _fetch_spot_price(asset: str, api_key: str, base_url: str, target_time: str = "") -> float:
+def _fetch_spot_price(
+	asset: str, api_key: str, base_url: str, target_time: str = ""
+) -> tuple[float, str]:
 	"""Single Surf spot-price call. Runs inside a nondet leader/validator
 	function -- never called outside gl.vm.run_nondet.
 	
-	When target_time (the claim's declared deadline) is provided, requests
-	the historical price sampled at that declared deadline timestamp so that
-	delayed locking cannot alter the settlement evidence.
+	When target_time (the claim's declared deadline) is provided, queries
+	with from={unix_from}&to={unix_to} spanning a 24-hour window ending at
+	the deadline, selecting the latest series point at or before the deadline.
+	When target_time is empty (posting), queries live ?symbol={asset}.
 	"""
 	if target_time:
-		url = f"{base_url}{SURF_PRICE_PATH}?symbol={asset}&timestamp={target_time}"
+		unix_to = _iso_to_unix(target_time)
+		unix_from = unix_to - 86400
+		url = f"{base_url}{SURF_PRICE_PATH}?symbol={asset}&from={unix_from}&to={unix_to}"
 	else:
 		url = f"{base_url}{SURF_PRICE_PATH}?symbol={asset}"
 	res = gl.nondet.web.get(url, headers={"Authorization": f"Bearer {api_key}"})
@@ -1148,7 +1239,7 @@ def _fetch_spot_price(asset: str, api_key: str, base_url: str, target_time: str 
 	if res.body is None:
 		raise gl.vm.UserError(f"{ERROR_EXTERNAL} Surf API returned empty body")
 	payload = json.loads(res.body.decode("utf-8"))
-	return _parse_surf_price(payload)
+	return _parse_surf_price(payload, target_time)
 
 
 def _fetch_prices_with_consensus(
@@ -1158,14 +1249,27 @@ def _fetch_prices_with_consensus(
 	Category B: comparative equivalence over one or more independently-
 	fetched Surf spot prices, ALL within a single non-deterministic block --
 	one leader/validator round covers every asset in `assets`. When target_time
-	is provided, samples at the declared deadline timestamp.
+	is provided, samples at the declared deadline timestamp using from/to.
+	The returned fetched_at is the selected point timestamp (or latest among assets),
+	which is strictly <= target_time.
 	"""
 
 	def leader_fn() -> dict:
-		prices = [_fetch_spot_price(asset, api_key, base_url, target_time) for asset in assets]
+		results = [_fetch_spot_price(asset, api_key, base_url, target_time) for asset in assets]
+		prices = [r[0] for r in results]
+		point_isos = [r[1] for r in results if r[1]]
+		if target_time:
+			if not point_isos or len(point_isos) != len(assets):
+				raise gl.vm.UserError(
+					f"{ERROR_EXTERNAL} missing or invalid payload point timestamp at deadline"
+				)
+			point_isos.sort()
+			fetched_at = point_isos[-1]
+		else:
+			fetched_at = gl.message_raw["datetime"]
 		return {
 			"prices": [str(p) for p in prices],
-			"fetched_at": target_time if target_time else gl.message_raw["datetime"],
+			"fetched_at": fetched_at,
 		}
 
 	def validator_fn(leaders_res: gl.vm.Result) -> bool:
@@ -1199,58 +1303,47 @@ def _fetch_price_with_consensus(
 	return prices[0], fetched_at
 
 
-def _parse_fundamentals_value(payload: dict, target_time: str = "") -> float:
+def _parse_fundamentals_value(payload: dict | list, target_time: str = "") -> tuple[float, str]:
 	"""
 	Defensive extraction of the value from a Fundamentals data response.
-	If target_time (declared deadline) is provided, selects the data point
-	at or closest to (at or before) target_time so that delayed locking cannot
-	alter the sampled metric value.
+	If target_time (declared deadline) is provided, selects the latest data point
+	at or before target_time. If no points <= target_time, raises UserError with
+	ERROR_EXTERNAL.
 	"""
-	data = payload.get("data") if isinstance(payload, dict) else None
-	if not isinstance(data, list) or not data:
+	data = payload.get("data", payload) if isinstance(payload, dict) else payload
+	if isinstance(data, dict):
+		points = [data]
+	elif isinstance(data, list):
+		points = data
+	else:
+		raise gl.vm.UserError(
+			f"{ERROR_EXTERNAL} unrecognized fundamentals response shape: {type(data)}"
+		)
+	if not points:
 		raise gl.vm.UserError(
 			f"{ERROR_EXTERNAL} unrecognized fundamentals response shape: no data points"
 		)
-	best_point = None
-	if target_time:
-		for point in data:
-			if not isinstance(point, dict) or "value" not in point or "timestamp" not in point:
-				continue
-			p_time = str(point["timestamp"])
-			if p_time <= target_time:
-				if best_point is None or p_time > str(best_point["timestamp"]):
-					best_point = point
-		if best_point is None:
-			for point in data:
-				if not isinstance(point, dict) or "value" not in point or "timestamp" not in point:
-					continue
-				if best_point is None or str(point["timestamp"]) < str(best_point["timestamp"]):
-					best_point = point
-	else:
-		for point in data:
-			if not isinstance(point, dict) or "value" not in point or "timestamp" not in point:
-				continue
-			if best_point is None or point["timestamp"] > best_point["timestamp"]:
-				best_point = point
-	if best_point is None:
-		raise gl.vm.UserError(
-			f"{ERROR_EXTERNAL} unrecognized fundamentals response shape: no valid data points"
-		)
-	return float(best_point["value"])
+	target_unix = _iso_to_unix(target_time) if target_time else None
+	selected_pt, point_iso = _select_series_point(points, target_unix)
+	for key in ("value", "price", "metric_value"):
+		if key in selected_pt:
+			return float(selected_pt[key]), point_iso
+	raise gl.vm.UserError(
+		f"{ERROR_EXTERNAL} unrecognized fundamentals data point shape: keys={list(selected_pt.keys())}"
+	)
 
 
 def _fetch_fundamentals_value(
 	asset: str, metric: str, api_key: str, base_url: str, target_time: str = ""
-) -> float:
+) -> tuple[float, str]:
 	"""Single Surf fundamentals call (TVL via /project/defi/metrics, the
-	three on-chain indicators via /market/onchain-indicator). Passes target_time
-	when sampling at declared deadline."""
+	three on-chain indicators via /market/onchain-indicator).
+	Does NOT append timestamp=.
+	"""
 	if metric == FUNDAMENTALS_METRIC_TVL:
 		url = f"{base_url}{SURF_DEFI_METRICS_PATH}?q={asset}&metric=tvl"
 	else:
 		url = f"{base_url}{SURF_ONCHAIN_INDICATOR_PATH}?symbol={asset}&metric={metric.lower()}"
-	if target_time:
-		url += f"&timestamp={target_time}"
 
 	res = gl.nondet.web.get(url, headers={"Authorization": f"Bearer {api_key}"})
 	if res.status is None or res.status >= 500:
@@ -1272,10 +1365,18 @@ def _fetch_fundamentals_with_consensus(
 	"""
 
 	def leader_fn() -> dict:
-		value = _fetch_fundamentals_value(asset, metric, api_key, base_url, target_time)
+		value, point_iso = _fetch_fundamentals_value(asset, metric, api_key, base_url, target_time)
+		if target_time:
+			if not point_iso:
+				raise gl.vm.UserError(
+					f"{ERROR_EXTERNAL} missing or invalid payload point timestamp at deadline"
+				)
+			fetched_at = point_iso
+		else:
+			fetched_at = gl.message_raw["datetime"]
 		return {
 			"value": str(value),
-			"fetched_at": target_time if target_time else gl.message_raw["datetime"],
+			"fetched_at": fetched_at,
 		}
 
 	def validator_fn(leaders_res: gl.vm.Result) -> bool:
@@ -1303,7 +1404,9 @@ def _encode_fundamentals_value(value: float) -> u256:
 
 def _decode_fundamentals_value(atto_value: u256) -> float:
 	"""Inverse of _encode_fundamentals_value."""
-	return (atto_value / ATTO) - FUNDAMENTALS_SIGNED_OFFSET
+	return round(
+		(int(atto_value) - int(FUNDAMENTALS_SIGNED_OFFSET * ATTO)) / ATTO, 8
+	)
 
 
 VERDICT_TASK = (
@@ -1442,6 +1545,11 @@ def _parse_iso(dt_str: str) -> "datetime.datetime":
 def _appeal_window_elapsed(contested_at: str, now_str: str) -> bool:
 	deadline = _parse_iso(contested_at) + datetime.timedelta(hours=APPEAL_WINDOW_HOURS)
 	return _parse_iso(now_str) >= deadline
+
+
+def _unsettled_lock_grace_elapsed(deadline_str: str, now_str: str) -> bool:
+	expiry = _parse_iso(deadline_str) + datetime.timedelta(hours=UNSETTLED_LOCK_GRACE_HOURS)
+	return _parse_iso(now_str) >= expiry
 
 
 def _build_price_threshold_facts(claim: "Claim") -> str:
@@ -1838,6 +1946,8 @@ class AlphaCourt(gl.Contract):
 			"contested_at": claim.contested_at,
 			"second_verdict_text": claim.second_verdict_text,
 			"appeal_outcome": claim.appeal_outcome,
+			"appeal_filed_at": claim.appeal_filed_at,
+			"evidence_locked_at": claim.evidence_locked_at,
 			"paid": claim.paid,
 			"treasury": self.treasury.as_hex,
 		}
@@ -2052,6 +2162,8 @@ class AlphaCourt(gl.Contract):
 			contested_at="",
 			second_verdict_text="",
 			appeal_outcome="",
+			appeal_filed_at="",
+			evidence_locked_at="",
 			paid=False,
 		)
 
@@ -2122,6 +2234,8 @@ class AlphaCourt(gl.Contract):
 			contested_at="",
 			second_verdict_text="",
 			appeal_outcome="",
+			appeal_filed_at="",
+			evidence_locked_at="",
 			paid=False,
 		)
 
@@ -2206,6 +2320,8 @@ class AlphaCourt(gl.Contract):
 			contested_at="",
 			second_verdict_text="",
 			appeal_outcome="",
+			appeal_filed_at="",
+			evidence_locked_at="",
 			paid=False,
 		)
 
@@ -2256,12 +2372,13 @@ class AlphaCourt(gl.Contract):
 	@gl.public.write
 	def lock_deadline_evidence(self, claim_id: str) -> None:
 		"""
-		OPEN -> EVIDENCE_LOCKED (spec S2): fetches the deadline-time
-		snapshot, sampled at the declared deadline timestamp (claim.deadline).
-		Callable by anyone once the deadline has passed -- this is also the
-		point at which staking closes (the `_stake` guard requires OPEN,
-		which this leaves).
-		
+		OPEN -> EVIDENCE_LOCKED (spec S2). Staking closes. Freezes the
+		deadline-time evidence snapshot via non-deterministic validator
+		consensus, matching the Category B posting fetch pattern (Step 0
+		finding 1). Once written, deadline_price_atto and
+		deadline_fetched_at cannot be overwritten (spec S2 immutability
+		rule).
+
 		Passing target_time=claim.deadline guarantees that delayed locking
 		cannot change the sampled settlement time or price.
 		"""
@@ -2274,27 +2391,100 @@ class AlphaCourt(gl.Contract):
 			# Immutability guard: once written, never overwritten by any path.
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} deadline snapshot already locked")
 
-		if claim.claim_type == CLAIM_TYPE_RELATIVE_PERFORMANCE:
-			(price_a, price_b), fetched_at = _fetch_prices_with_consensus(
-				[claim.asset, claim.asset_b], self.surf_api_key, self.surf_base_url, target_time=claim.deadline
-			)
-			claim.deadline_price_atto = u256(int(round(price_a * ATTO)))
-			claim.deadline_price_b_atto = u256(int(round(price_b * ATTO)))
-			claim.deadline_fetched_at = fetched_at
-		elif claim.claim_type == CLAIM_TYPE_FUNDAMENTALS_THRESHOLD:
-			value, fetched_at = _fetch_fundamentals_with_consensus(
-				claim.asset, claim.metric, self.surf_api_key, self.surf_base_url, target_time=claim.deadline
-			)
-			claim.deadline_price_atto = _encode_fundamentals_value(value)
-			claim.deadline_fetched_at = fetched_at
-		else:
-			price, fetched_at = _fetch_price_with_consensus(
-				claim.asset, self.surf_api_key, self.surf_base_url, target_time=claim.deadline
-			)
-			claim.deadline_price_atto = u256(int(round(price * ATTO)))
-			claim.deadline_fetched_at = fetched_at
+		try:
+			if claim.claim_type == CLAIM_TYPE_RELATIVE_PERFORMANCE:
+				(price_a, price_b), fetched_at = _fetch_prices_with_consensus(
+					[claim.asset, claim.asset_b], self.surf_api_key, self.surf_base_url, target_time=claim.deadline
+				)
+				claim.deadline_price_atto = u256(int(round(price_a * ATTO)))
+				claim.deadline_price_b_atto = u256(int(round(price_b * ATTO)))
+				claim.deadline_fetched_at = fetched_at
+			elif claim.claim_type == CLAIM_TYPE_FUNDAMENTALS_THRESHOLD:
+				value, fetched_at = _fetch_fundamentals_with_consensus(
+					claim.asset, claim.metric, self.surf_api_key, self.surf_base_url, target_time=claim.deadline
+				)
+				claim.deadline_price_atto = _encode_fundamentals_value(value)
+				claim.deadline_fetched_at = fetched_at
+			else:
+				price, fetched_at = _fetch_price_with_consensus(
+					claim.asset, self.surf_api_key, self.surf_base_url, target_time=claim.deadline
+				)
+				claim.deadline_price_atto = u256(int(round(price * ATTO)))
+				claim.deadline_fetched_at = fetched_at
+		except Exception as e:
+			err_str = str(e)
+			if ERROR_EXTERNAL in err_str:
+				# Deterministic external failure: no qualifying data point at or before deadline,
+				# or unparseable/missing payload timestamps. Re-trying will not fix this.
+				# Terminal exit: refund all deposited stakes and set state to REFUNDED, paid=True.
+				claim.state = ClaimState.REFUNDED
+				self.claims[claim_id] = claim
+				self._refund_all_stakes(claim)
+				self._record_passport(claim, "")
+				claim.paid = True
+				self.claims[claim_id] = claim
+				return
+			# Nondeterministic / transient errors (e.g. [TRANSIENT] 5xx) must still raise
+			# so lock can be retried when the external service is available.
+			raise
 
+		claim.evidence_locked_at = gl.message_raw["datetime"]
 		claim.state = ClaimState.EVIDENCE_LOCKED
+		self.claims[claim_id] = claim
+
+	@gl.public.write
+	def expire_unsettled(self, claim_id: str) -> None:
+		"""
+		Escape hatch for claims that remain unsettled in OPEN state after the deadline
+		and grace period (UNSETTLED_LOCK_GRACE_HOURS = 24h).
+		Permissionless: anyone may call it once the grace window has elapsed.
+		Transitions state to REFUNDED, refunds all deposited stakes to depositors,
+		records passport history, and sets paid=True so custody cannot strand funds forever.
+		"""
+		claim = self._get_claim(claim_id)
+		if claim.state != ClaimState.OPEN:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} claim is not OPEN (current state: {claim.state})")
+		if not _is_deadline_passed(claim.deadline, gl.message_raw["datetime"]):
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} claim deadline has not passed yet")
+		if not _unsettled_lock_grace_elapsed(claim.deadline, gl.message_raw["datetime"]):
+			raise gl.vm.UserError(
+				f"{ERROR_EXPECTED} unsettled lock grace period ({UNSETTLED_LOCK_GRACE_HOURS}h) has not elapsed"
+			)
+
+		claim.state = ClaimState.REFUNDED
+		self.claims[claim_id] = claim
+		self._refund_all_stakes(claim)
+		self._record_passport(claim, "")
+		claim.paid = True
+		self.claims[claim_id] = claim
+
+	@gl.public.write
+	def expire_unresolved_lock(self, claim_id: str) -> None:
+		"""
+		Escape hatch for claims that remain in EVIDENCE_LOCKED state without being
+		resolved within UNSETTLED_LOCK_GRACE_HOURS (24h) after evidence was locked.
+		Permissionless: anyone may call it once the grace window has elapsed.
+		Transitions state to REFUNDED, refunds all deposited stakes to depositors,
+		records passport history, and sets paid=True so custody cannot strand funds forever.
+		Evidence snapshot/price remains locked (does not wipe evidence).
+		"""
+		claim = self._get_claim(claim_id)
+		if claim.state != ClaimState.EVIDENCE_LOCKED:
+			raise gl.vm.UserError(
+				f"{ERROR_EXPECTED} claim is not EVIDENCE_LOCKED (current state: {claim.state})"
+			)
+		if not claim.evidence_locked_at:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} evidence_locked_at timestamp missing")
+		if not _unsettled_lock_grace_elapsed(claim.evidence_locked_at, gl.message_raw["datetime"]):
+			raise gl.vm.UserError(
+				f"{ERROR_EXPECTED} unresolved lock grace period ({UNSETTLED_LOCK_GRACE_HOURS}h) has not elapsed"
+			)
+
+		claim.state = ClaimState.REFUNDED
+		self.claims[claim_id] = claim
+		self._refund_all_stakes(claim)
+		self._record_passport(claim, "")
+		claim.paid = True
 		self.claims[claim_id] = claim
 
 	def _pay_native(self, to: Address, amount: u256) -> None:
@@ -2307,8 +2497,8 @@ class AlphaCourt(gl.Contract):
 		`staker` / `appeal_filer` are storage Addresses, same as
 		`pay_stored`'s `self.stored`.
 
-		Zero amount is a no-op, not an error (empty winning pool already
-		returns before this; leftover-share math can also yield 0).
+		Empty winning pool now refunds via _refund_all_stakes then returns.
+		Zero amount is still a no-op for leftover-share math.
 		"""
 		if int(amount) <= 0:
 			return
@@ -2446,37 +2636,16 @@ class AlphaCourt(gl.Contract):
 
 	def _distribute_bond_evenly(self, claim: Claim) -> None:
 		"""
-		Build Prompt 4.5, per master spec §6/§7 (now explicit -- "split
-		evenly across every ADDRESS that had an original stake"): on
-		REFUNDED-after-appeal (round 2 also fails to reach a clean
-		verdict), the appeal bond is forfeited and split evenly across
-		every unique staker ADDRESS on that claim (both FOR and AGAINST
-		sides), one share per address regardless of how many stake
-		records (FOR + AGAINST, or repeated stake_for/stake_against calls
-		already accumulated into one record by _record_stake) that
-		address has -- on top of each address's own exact-stake refund
-		from _refund_all_stakes. "Real deterrent against filing an appeal
-		into evidence that's genuinely too ambiguous to ever resolve,
-		while still leaving everyone slightly ahead of a bare refund
-		rather than the bond going nowhere" (§6).
-
-		Build Prompt 4's first version of this function split per stake
-		RECORD instead (one share per stake_keys entry), flagged at the
-		time as a reasonable-but-unconfirmed reading -- confirmed wrong by
-		this prompt's explicit "every address" wording: an address that
-		staked both FOR and AGAINST on the same claim (a real, already-
-		exercised scenario elsewhere in this codebase -- see
-		test_staking.py's three-way-split test, where the claimant stakes
-		against her own claim after an optional posting stake) would have
-		received two shares instead of one. Fixed here by de-duplicating
-		on the staker's hex address before computing the per-share amount.
-
-		Rounding: `bond_atto // unique_staker_count` for every address
-		but the last; the last address also receives `bond_atto % n` so
-		the full forfeited bond leaves the contract (FairSplit-class
-		dust, at most n-1 atto). Still never pays out more than was
-		forfeited.
+		Build Prompt 4.5, per master spec §6/§7: on REFUNDED-after-appeal
+		(round 2 also fails to reach a clean verdict / NO_AGREEMENT), the
+		appeal bond is forfeited and split evenly across every unique staker
+		ADDRESS on that claim (both FOR and AGAINST sides).
+		If there are zero original stakers on the claim (unique_stakers is empty)
+		and an appeal was filed, the 100% bond is returned to the appeal filer
+		rather than remaining stranded in the contract.
 		"""
+		if claim.appeal_bond_atto == 0:
+			return
 		prefix = f"{claim.claim_id}:"
 		unique_stakers: dict[str, Address] = {}
 		for key in self.stake_keys:
@@ -2487,8 +2656,11 @@ class AlphaCourt(gl.Contract):
 			if addr_hex not in unique_stakers:
 				unique_stakers[addr_hex] = stake.staker
 
-		if not unique_stakers or claim.appeal_bond_atto == 0:
+		if not unique_stakers:
+			if claim.appeal_filer != ZERO_ADDRESS:
+				self._pay_native(claim.appeal_filer, claim.appeal_bond_atto)
 			return
+
 		# Remainder goes to the last of lowercase-hex-ascending addresses.
 		ordered = [unique_stakers[k] for k in sorted(unique_stakers.keys())]
 		bond = int(claim.appeal_bond_atto)
@@ -2653,6 +2825,7 @@ class AlphaCourt(gl.Contract):
 			)
 
 		claim.appeal_filer = gl.message.sender_address
+		claim.appeal_filed_at = gl.message_raw["datetime"]
 		claim.state = ClaimState.APPEAL_PENDING
 		self.claims[claim_id] = claim
 		self._mark_tx_spent(hash_norm)
@@ -2709,6 +2882,8 @@ class AlphaCourt(gl.Contract):
 			self._refund_all_stakes(claim)
 			self._distribute_bond_evenly(claim)
 			self._record_passport(claim, "")
+			claim.paid = True
+			self.claims[claim_id] = claim
 			return
 
 		claim.appeal_outcome = APPEAL_OUTCOME_SETTLED
@@ -2744,3 +2919,59 @@ class AlphaCourt(gl.Contract):
 		self.claims[claim_id] = claim
 		self._refund_all_stakes(claim)
 		self._record_passport(claim, "")
+		claim.paid = True
+		self.claims[claim_id] = claim
+
+	@gl.public.write
+	def expire_unresolved_appeal(self, claim_id: str) -> None:
+		"""
+		CONTESTED -> APPEAL_PENDING -> REFUNDED if appeal is not resolved within
+		APPEAL_WINDOW_HOURS (48h) after being filed.
+		Permissionless: anyone may call once the window has elapsed.
+		Refunds all deposited stakes, distributes the appeal bond evenly to stakers
+		(or 100% to filer if no other stakers), records passport history, and sets paid=True.
+		"""
+		claim = self._get_claim(claim_id)
+		if claim.state != ClaimState.APPEAL_PENDING:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} claim is not APPEAL_PENDING")
+		if not claim.appeal_filed_at:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} appeal_filed_at timestamp missing")
+		if not _appeal_window_elapsed(claim.appeal_filed_at, gl.message_raw["datetime"]):
+			raise gl.vm.UserError(
+				f"{ERROR_EXPECTED} appeal resolution window ({APPEAL_WINDOW_HOURS}h) has not elapsed"
+			)
+
+		claim.appeal_outcome = APPEAL_OUTCOME_NO_AGREEMENT
+		claim.state = ClaimState.REFUNDED
+		self.claims[claim_id] = claim
+		self._refund_all_stakes(claim)
+		self._distribute_bond_evenly(claim)
+		self._record_passport(claim, "")
+		claim.paid = True
+		self.claims[claim_id] = claim
+
+	@gl.public.write
+	def retry_refund(self, claim_id: str) -> None:
+		"""Re-run the REFUNDED payout sends if they have not already completed.
+
+		Needed when an emit_transfer child failed or needs retry. Only the
+		claim poster or the keeper may call it. Not silently idempotent:
+		a claim with paid=True is rejected with a UserError.
+		"""
+		claim = self._get_claim(claim_id)
+		if claim.state != ClaimState.REFUNDED:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} claim is not REFUNDED")
+		if claim.paid:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} claim already paid")
+		sender = gl.message.sender_address
+		if sender != claim.poster and sender != self.keeper:
+			raise gl.vm.UserError(
+				f"{ERROR_EXPECTED} only the claim poster or keeper may retry refund"
+			)
+
+		self._refund_all_stakes(claim)
+		if claim.appeal_filer != ZERO_ADDRESS and claim.appeal_bond_atto > 0:
+			if claim.appeal_outcome == APPEAL_OUTCOME_NO_AGREEMENT or claim.appeal_outcome == "":
+				self._distribute_bond_evenly(claim)
+		claim.paid = True
+		self.claims[claim_id] = claim

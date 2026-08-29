@@ -824,6 +824,7 @@ class Claim:
 	second_verdict_text: str
 	appeal_outcome: str
 	appeal_filed_at: str
+	evidence_locked_at: str
 
 	# Set True inside _payout_for_claim the moment a payout completes.
 	# retry_payout is permissionless-looking but re-runs this path, and
@@ -1946,6 +1947,7 @@ class AlphaCourt(gl.Contract):
 			"second_verdict_text": claim.second_verdict_text,
 			"appeal_outcome": claim.appeal_outcome,
 			"appeal_filed_at": claim.appeal_filed_at,
+			"evidence_locked_at": claim.evidence_locked_at,
 			"paid": claim.paid,
 			"treasury": self.treasury.as_hex,
 		}
@@ -2161,6 +2163,7 @@ class AlphaCourt(gl.Contract):
 			second_verdict_text="",
 			appeal_outcome="",
 			appeal_filed_at="",
+			evidence_locked_at="",
 			paid=False,
 		)
 
@@ -2232,6 +2235,7 @@ class AlphaCourt(gl.Contract):
 			second_verdict_text="",
 			appeal_outcome="",
 			appeal_filed_at="",
+			evidence_locked_at="",
 			paid=False,
 		)
 
@@ -2317,6 +2321,7 @@ class AlphaCourt(gl.Contract):
 			second_verdict_text="",
 			appeal_outcome="",
 			appeal_filed_at="",
+			evidence_locked_at="",
 			paid=False,
 		)
 
@@ -2367,14 +2372,13 @@ class AlphaCourt(gl.Contract):
 	@gl.public.write
 	def lock_deadline_evidence(self, claim_id: str) -> None:
 		"""
-		OPEN -> EVIDENCE_LOCKED (spec S2): fetches the deadline-time
-		snapshot, querying Surf with a 24-hour from/to window ending at the
-		declared deadline timestamp (claim.deadline), selecting the latest
-		series data point at or before the deadline.
-		Callable by anyone once the deadline has passed -- this is also the
-		point at which staking closes (the `_stake` guard requires OPEN,
-		which this leaves).
-		
+		OPEN -> EVIDENCE_LOCKED (spec S2). Staking closes. Freezes the
+		deadline-time evidence snapshot via non-deterministic validator
+		consensus, matching the Category B posting fetch pattern (Step 0
+		finding 1). Once written, deadline_price_atto and
+		deadline_fetched_at cannot be overwritten (spec S2 immutability
+		rule).
+
 		Passing target_time=claim.deadline guarantees that delayed locking
 		cannot change the sampled settlement time or price.
 		"""
@@ -2424,6 +2428,7 @@ class AlphaCourt(gl.Contract):
 			# so lock can be retried when the external service is available.
 			raise
 
+		claim.evidence_locked_at = gl.message_raw["datetime"]
 		claim.state = ClaimState.EVIDENCE_LOCKED
 		self.claims[claim_id] = claim
 
@@ -2444,6 +2449,35 @@ class AlphaCourt(gl.Contract):
 		if not _unsettled_lock_grace_elapsed(claim.deadline, gl.message_raw["datetime"]):
 			raise gl.vm.UserError(
 				f"{ERROR_EXPECTED} unsettled lock grace period ({UNSETTLED_LOCK_GRACE_HOURS}h) has not elapsed"
+			)
+
+		claim.state = ClaimState.REFUNDED
+		self.claims[claim_id] = claim
+		self._refund_all_stakes(claim)
+		self._record_passport(claim, "")
+		claim.paid = True
+		self.claims[claim_id] = claim
+
+	@gl.public.write
+	def expire_unresolved_lock(self, claim_id: str) -> None:
+		"""
+		Escape hatch for claims that remain in EVIDENCE_LOCKED state without being
+		resolved within UNSETTLED_LOCK_GRACE_HOURS (24h) after evidence was locked.
+		Permissionless: anyone may call it once the grace window has elapsed.
+		Transitions state to REFUNDED, refunds all deposited stakes to depositors,
+		records passport history, and sets paid=True so custody cannot strand funds forever.
+		Evidence snapshot/price remains locked (does not wipe evidence).
+		"""
+		claim = self._get_claim(claim_id)
+		if claim.state != ClaimState.EVIDENCE_LOCKED:
+			raise gl.vm.UserError(
+				f"{ERROR_EXPECTED} claim is not EVIDENCE_LOCKED (current state: {claim.state})"
+			)
+		if not claim.evidence_locked_at:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} evidence_locked_at timestamp missing")
+		if not _unsettled_lock_grace_elapsed(claim.evidence_locked_at, gl.message_raw["datetime"]):
+			raise gl.vm.UserError(
+				f"{ERROR_EXPECTED} unresolved lock grace period ({UNSETTLED_LOCK_GRACE_HOURS}h) has not elapsed"
 			)
 
 		claim.state = ClaimState.REFUNDED

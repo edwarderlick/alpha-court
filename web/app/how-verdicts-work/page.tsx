@@ -40,7 +40,7 @@ const STEPS = [
     n: "05",
     icon: "terminal",
     title: "OUTCOME & APPEAL",
-    body: "A decisive HELD or BROKEN stores that outcome from the verdict text and records Passport. Stakes and appeal bonds are sent to a published treasury wallet, never into the contract — Studio cannot push GEN out of an Intelligent Contract. Payouts are still keeper native sends from that same treasury. The system is custody-free at the contract, not trustless end to end. My Stakes marks Paid only after the wallet balance actually increases.",
+    body: "A decisive HELD or BROKEN stores that outcome from the verdict text and records Passport. Stakes and appeal bonds are verified by hash and held directly in the contract (treasury = SELF). The court pays winners and refunds directly via emit_transfer from its own balance. The keeper ticks lock/resolve/expire on a clock, but does not fund payouts.",
     featured: false,
   },
 ];

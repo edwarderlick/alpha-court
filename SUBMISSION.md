@@ -82,7 +82,7 @@ The weeks-old belief that Studionet cannot IC→EOA was a type-handling bug, iso
 | Deposit / treasury | the court itself (`SELF`) |
 | Retired courts | `0xd3cD69…`, `0x8b2fF616…`, `0x22Cf7A9e…`, `0xF9Df5e7b…`, `0x219e7531…`, `0x1b8Fc1a2…` |
 | Network | studionet, chain `61999` |
-| Direct tests | 126 passed, 0 failed in 10.03s (`pytest test/direct/ -v` from `contract/`) |
+| Direct tests | 128 passed, 0 failed in 11.35s (`pytest test/direct/ -v` from `contract/`) |
 | Deploy tx (live court) | `0x71326b5aebebd20c045ed0037a153a67ba1e0dfa63424f68576cba9220c0b4e1` |
 
 **Two full lifecycles on a prior court, preserved as §4's cache-deletion proof** (not the current live address; the current court's own cycle is in §2 / §5). Real txs, real ~90-second wait, real leader + validator consensus — not a direct-mode mock:
@@ -237,7 +237,7 @@ That matches the independently-known fields for that send. Only then was the cou
 
 *Note on deployment status:* These lock, parser, custody escape hatches, and refund-path changes are implemented in the PR source on branch `steward-declared-time-evidence` and verified by direct tests (`contract/test/direct/test_steward_resubmission_fixes.py`); they are not yet the live court bytecode (`0x0312c04c…`), as no Studio redeploy has been done for this resubmission.
 
-Every point is addressed in contract logic. Direct test suite pass count: 126 passed, 0 failed in 10.03s (`pytest test/direct/ -v` from `contract/`).
+Every point is addressed in contract logic. Direct test suite pass count: 128 passed, 0 failed in 11.35s (`pytest test/direct/ -v` from `contract/`).
 
 ### 6a. Verifiable Declared-Time Deadline Evidence
 
@@ -271,9 +271,20 @@ In `_payout_for_claim`, when `winning_pool == 0`, the contract calls `_refund_al
 To ensure that deposited funds can never sit in contract custody without a working release path:
 1. **Deterministic Lock Evidence Failure Refunds**: If `lock_deadline_evidence` encounters a deterministic `[EXTERNAL]` error (no data point $\le$ deadline or missing/unparseable timestamps), it immediately transitions the claim to `REFUNDED`, refunds 100% of deposited stakes via `_refund_all_stakes`, sets `claim.paid = True`, and returns gracefully rather than remaining `OPEN` forever. Transient 5xx errors still raise so locking can be retried.
 2. **Unsettled Lock Expiry (`expire_unsettled`)**: Adds permissionless `expire_unsettled(claim_id)` with `UNSETTLED_LOCK_GRACE_HOURS = 24`. If a claim remains in `OPEN` state 24 hours after the deadline has passed without evidence being locked, anyone can trigger a refund of all deposited stakes to depositors.
-3. **Unresolved Appeal Expiry (`expire_unresolved_appeal`)**: `file_appeal` records `claim.appeal_filed_at`. If an appeal remains in `APPEAL_PENDING` without being resolved after `APPEAL_WINDOW_HOURS = 48`, anyone can call `expire_unresolved_appeal(claim_id)` to transition to `REFUNDED`, refund all stakes, split the bond evenly (or return to filer if no stakers), record passport history, and mark `claim.paid = True`.
-4. **Refund Retry Path (`retry_refund`)**: `expire_appeal`, `resolve_appeal` NO_AGREEMENT, deterministic lock refund, `expire_unsettled`, and `expire_unresolved_appeal` all set `claim.paid = True`. If a transfer child ever fails, the claim poster or keeper can call `retry_refund(claim_id)`, which re-sends the refunds and sets `paid = True`. A second call reverts with `claim already paid`.
-5. **8-Branch Terminal Payout Accounting Audit**: All 8 terminal payout paths (Normal Win, 0-Winner Refund, Expire Appeal, Settled Appeal, No-Agreement Appeal, Deterministic Lock Failure Refund, Expire Unsettled, Expire Unresolved Appeal) account for 100% of deposited funds.
+3. **Unresolved Locked Evidence Expiry (`expire_unresolved_lock`)**: When evidence is locked, `claim.evidence_locked_at` records the lock timestamp. If an `EVIDENCE_LOCKED` claim remains unresolved after 24 hours (e.g. validator consensus stalls or fails to reach quorum), anyone can call `expire_unresolved_lock(claim_id)` to transition to `REFUNDED`, refund all deposited stakes, record passport history, and set `claim.paid = True`. Evidence snapshots remain preserved.
+4. **Unresolved Appeal Expiry (`expire_unresolved_appeal`)**: `file_appeal` records `claim.appeal_filed_at`. If an appeal remains in `APPEAL_PENDING` without being resolved after `APPEAL_WINDOW_HOURS = 48`, anyone can call `expire_unresolved_appeal(claim_id)` to transition to `REFUNDED`, refund all stakes, split the bond evenly (or return to filer if no stakers), record passport history, and mark `claim.paid = True`.
+5. **Refund Retry Path (`retry_refund`)**: `expire_appeal`, `resolve_appeal` NO_AGREEMENT, deterministic lock refund, `expire_unsettled`, `expire_unresolved_lock`, and `expire_unresolved_appeal` all set `claim.paid = True`. If a transfer child ever fails, the claim poster or keeper can call `retry_refund(claim_id)`, which re-sends the refunds and sets `paid = True`. A second call reverts with `claim already paid`.
+6. **10-Branch Terminal Payout Accounting Audit**: All 10 terminal payout paths account for 100% of deposited funds, proven by checking both staker balance increases and contract/treasury balance delta = 0:
+   - Branch 1: Normal RESOLVED win (Proportional pool split)
+   - Branch 2: Zero-winner RESOLVED (Full stake refund)
+   - Branch 3: REFUNDED via expire_appeal (Full stake refund)
+   - Branch 4: SETTLED via resolve_appeal (Proportional win + 100% bond return)
+   - Branch 5: NO_AGREEMENT via resolve_appeal (Full stake refund + 100% bond split)
+   - Branch 6: REFUNDED via lock_deadline_evidence deterministic external failure (Full stake refund)
+   - Branch 7: REFUNDED via expire_unsettled (Full stake refund after 24h grace)
+   - Branch 8: REFUNDED via expire_unresolved_appeal (Full stake refund + 100% bond split after 48h)
+   - Branch 9: Ugly uneven 3-way winner split with indivisible losing pool remainder (13 GEN total, 1 atto remainder to highest hex winner, every single atto leaves, court extra = 0)
+   - Branch 10: REFUNDED via expire_unresolved_lock (Full stake refund after 24h lock grace, evidence intact, court extra = 0)
 
 `contract/test/direct/test_steward_resubmission_fixes.py` tests:
 1. `test_lock_with_no_qualifying_point_refunds_all_stakes`: Post-deadline-only lock points transitions to REFUNDED, returns 100% of stakes, `paid == True`, `deadline_snapshot_at == ""`.
@@ -282,5 +293,7 @@ To ensure that deposited funds can never sit in contract custody without a worki
 4. `test_expire_unsettled_after_grace_refunds_all_stakes`: `expire_unsettled` refunds 100% of stakes after 24h grace.
 5. `test_expire_unresolved_appeal_before_window_reverts`: `expire_unresolved_appeal` reverts before 48h after appeal filing.
 6. `test_expire_unresolved_appeal_after_window_refunds_and_distributes_bond`: `expire_unresolved_appeal` refunds stakes and splits bond after 48h.
-7. `test_retry_refund_sends_once_second_call_reverts`: `retry_refund` performs refunds and sets `paid=True`; second call reverts `claim already paid`. Stranger calls revert.
-8. `test_all_terminal_payout_branches_account_for_all_deposited_funds`: Exhaustive 8-branch accounting test proving exact 100% balance disbursement.
+7. `test_expire_unresolved_lock_before_grace_reverts`: `expire_unresolved_lock` reverts before lock + 24h grace.
+8. `test_expire_unresolved_lock_after_grace_refunds_all_stakes`: `expire_unresolved_lock` refunds 100% of stakes after 24h grace and preserves locked evidence.
+9. `test_retry_refund_sends_once_second_call_reverts`: `retry_refund` performs refunds and sets `paid=True`; second call reverts `claim already paid`. Stranger calls revert.
+10. `test_all_terminal_payout_branches_account_for_all_deposited_funds`: Exhaustive 10-branch accounting test proving exact 100% balance disbursement and 0 retained court balance delta.

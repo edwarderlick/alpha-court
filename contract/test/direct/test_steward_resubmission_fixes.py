@@ -23,6 +23,7 @@ from test.direct.tx_helpers import (
 )
 
 TEST_TREASURY = "0x1111111111111111111111111111111111111111"
+TEST_TREASURY_BYTES = bytes.fromhex(TEST_TREASURY[2:])
 DECLARED_DEADLINE = "2026-10-01T12:00:00Z"
 FUTURE_DEADLINE = "2999-01-01T00:00:00.000Z"
 LOCK_DEADLINE = "2026-08-01T12:00:00Z"
@@ -33,6 +34,8 @@ TRAP_POST_DEADLINE = "2026-08-01T18:00:00Z"
 
 STAKER_A = bytes.fromhex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 STAKER_B = bytes.fromhex("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+STAKER_C = bytes.fromhex("dddddddddddddddddddddddddddddddddddddddd")
+STAKER_D = bytes.fromhex("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
 FILER = bytes.fromhex("cccccccccccccccccccccccccccccccccccccccc")
 
 ATTO = 10**18
@@ -537,6 +540,68 @@ def test_expire_unresolved_appeal_after_window_refunds_and_distributes_bond(
 	assert balance_of(direct_vm, STAKER_B) == bal_b_before + int(2.5 * ATTO)
 
 
+def test_expire_unresolved_lock_before_grace_reverts(direct_deploy, direct_vm):
+	"""In EVIDENCE_LOCKED, but before evidence_locked_at + 24h: expire_unresolved_lock reverts."""
+	mock_price(direct_vm, 2000.0)
+	c = deploy(direct_deploy)
+	cid = c.create_claim("ETH/USD", "2500.0", "above", FUTURE_DEADLINE)
+	register_stake(c, direct_vm, cid, "for", 2 * ATTO, STAKER_A)
+
+	# While OPEN, expire_unresolved_lock reverts
+	with pytest.raises(Exception, match="claim is not EVIDENCE_LOCKED"):
+		c.expire_unresolved_lock(cid)
+
+	# Advance to EVIDENCE_LOCKED with current time (0h < 24h grace)
+	claim = c.claims[cid]
+	claim.state = "EVIDENCE_LOCKED"
+	claim.evidence_locked_at = claim.created_at
+	claim.deadline_price_atto = 3000 * ATTO
+	claim.deadline_fetched_at = DECLARED_DEADLINE
+	c.claims[cid] = claim
+
+	with pytest.raises(Exception, match="unresolved lock grace period"):
+		c.expire_unresolved_lock(cid)
+
+	assert c.get_claim(cid)["state"] == "EVIDENCE_LOCKED"
+
+
+def test_expire_unresolved_lock_after_grace_refunds_all_stakes(direct_deploy, direct_vm):
+	"""In EVIDENCE_LOCKED, after evidence_locked_at + 24h: expire_unresolved_lock transitions
+	EVIDENCE_LOCKED -> REFUNDED, refunds 100% of deposited stakes, paid == True, preserves evidence,
+	and blocks subsequent resolve_verdict."""
+	mock_price(direct_vm, 2000.0)
+	install_payout_and_verdict_hook(direct_vm)
+	c = deploy(direct_deploy)
+	cid = c.create_claim("ETH/USD", "2500.0", "above", FUTURE_DEADLINE)
+	register_stake(c, direct_vm, cid, "for", 2 * ATTO, STAKER_A)
+	register_stake(c, direct_vm, cid, "against", 3 * ATTO, STAKER_B)
+
+	claim = c.claims[cid]
+	claim.state = "EVIDENCE_LOCKED"
+	claim.evidence_locked_at = "2000-01-01T00:00:00.000Z"
+	claim.deadline_price_atto = 3000 * ATTO
+	claim.deadline_fetched_at = DECLARED_DEADLINE
+	c.claims[cid] = claim
+
+	bal_a_before = balance_of(direct_vm, STAKER_A)
+	bal_b_before = balance_of(direct_vm, STAKER_B)
+
+	c.expire_unresolved_lock(cid)
+
+	refunded = c.get_claim(cid)
+	assert refunded["state"] == "REFUNDED"
+	assert refunded["paid"] is True
+	# Evidence remains preserved (not wiped)
+	assert refunded["deadline_price"] == "3000.0"
+	assert refunded["deadline_snapshot_at"] == DECLARED_DEADLINE
+	assert balance_of(direct_vm, STAKER_A) == bal_a_before + 2 * ATTO
+	assert balance_of(direct_vm, STAKER_B) == bal_b_before + 3 * ATTO
+
+	# Subsequent resolve_verdict reverts because claim is REFUNDED
+	with pytest.raises(Exception, match="claim is not EVIDENCE_LOCKED"):
+		c.resolve_verdict(cid)
+
+
 def test_retry_refund_sends_once_second_call_reverts(direct_deploy, direct_vm):
 	"""Test 7: On a REFUNDED claim with paid=False, retry_refund refunds stakes and sets paid=True.
 	Second call reverts with 'claim already paid'."""
@@ -619,7 +684,8 @@ def test_zero_stakers_on_winning_side_refunds_all_deposited_funds(direct_deploy,
 
 def test_all_terminal_payout_branches_account_for_all_deposited_funds(direct_deploy, direct_vm):
 	"""
-	Test 8: Verify 100% fund disbursement and conservation across all 8 terminal payout paths:
+	Test 8: Verify 100% fund disbursement and conservation across all 10 terminal payout paths.
+	Asserts staker payouts, zero funds trapped, and exact 0 court-balance delta (no retained extra):
 	Branch 1: Normal RESOLVED win (Proportional pool split)
 	Branch 2: Zero-winner RESOLVED (Full stake refund)
 	Branch 3: REFUNDED via expire_appeal (Full stake refund)
@@ -628,6 +694,8 @@ def test_all_terminal_payout_branches_account_for_all_deposited_funds(direct_dep
 	Branch 6: REFUNDED via lock_deadline_evidence deterministic external failure (Full stake refund)
 	Branch 7: REFUNDED via expire_unsettled (Full stake refund after 24h grace)
 	Branch 8: REFUNDED via expire_unresolved_appeal (Full stake refund + 100% bond split after 48h)
+	Branch 9: Ugly uneven 3-winner split with losing pool remainder (13 GEN total, 1 atto remainder to highest hex winner, 100% disbursed)
+	Branch 10: REFUNDED via expire_unresolved_lock (Full stake refund after 24h lock grace, evidence intact)
 	"""
 	mock_price(direct_vm, 2000.0)
 	install_payout_and_verdict_hook(direct_vm, "HELD. Price 3000 exceeds 2500.")
@@ -644,10 +712,13 @@ def test_all_terminal_payout_branches_account_for_all_deposited_funds(direct_dep
 	claim1.deadline_fetched_at = DECLARED_DEADLINE
 	c.claims[cid1] = claim1
 
+	bal_a_before = balance_of(direct_vm, STAKER_A)
+	bal_b_before = balance_of(direct_vm, STAKER_B)
 	c.resolve_verdict(cid1)
 	# Winner (A) gets 2 GEN stake + 1 GEN losing pool = 3 GEN (100% of 3 GEN deposited)
-	assert balance_of(direct_vm, STAKER_A) == 3 * ATTO
-	assert balance_of(direct_vm, STAKER_B) == 0
+	assert balance_of(direct_vm, STAKER_A) == bal_a_before + 3 * ATTO
+	assert balance_of(direct_vm, STAKER_B) == bal_b_before
+	assert balance_of(direct_vm, TEST_TREASURY_BYTES) == 0
 
 	# --- Branch 2: Zero-Winner RESOLVED (0 GEN FOR vs 3 GEN AGAINST -> HELD outcome refunds 3 GEN) ---
 	cid2 = c.create_claim("ETH/USD", "2500.0", "above", FUTURE_DEADLINE)
@@ -663,6 +734,7 @@ def test_all_terminal_payout_branches_account_for_all_deposited_funds(direct_dep
 	c.resolve_verdict(cid2)
 	# Against staker B receives 100% refund of 3 GEN stake (100% of 3 GEN deposited)
 	assert balance_of(direct_vm, STAKER_B) == bal_b_before + 3 * ATTO
+	assert balance_of(direct_vm, TEST_TREASURY_BYTES) == 0
 
 	# --- Branch 3: REFUNDED via expire_appeal (2 GEN FOR + 1 GEN AGAINST) ---
 	cid3 = c.create_claim("ETH/USD", "2500.0", "above", FUTURE_DEADLINE)
@@ -681,6 +753,7 @@ def test_all_terminal_payout_branches_account_for_all_deposited_funds(direct_dep
 	# Both get exact stake refunded: A +2 GEN, B +1 GEN (100% of 3 GEN deposited)
 	assert balance_of(direct_vm, STAKER_A) == bal_a_before + 2 * ATTO
 	assert balance_of(direct_vm, STAKER_B) == bal_b_before + 1 * ATTO
+	assert balance_of(direct_vm, TEST_TREASURY_BYTES) == 0
 
 	# --- Branch 4: SETTLED Appeal (Winners paid + bond returned to filer) ---
 	cid4 = c.create_claim("ETH/USD", "2500.0", "above", FUTURE_DEADLINE)
@@ -708,6 +781,7 @@ def test_all_terminal_payout_branches_account_for_all_deposited_funds(direct_dep
 	# Winner A gets 2 + 2 = 4 GEN. Filer gets 1 GEN bond back. Total 5 GEN (100%)
 	assert balance_of(direct_vm, STAKER_A) == bal_a_before + 4 * ATTO
 	assert balance_of(direct_vm, FILER) == bal_f_before + 1 * ATTO
+	assert balance_of(direct_vm, TEST_TREASURY_BYTES) == 0
 
 	# --- Branch 5: NO_AGREEMENT Appeal (Stakes refunded + bond evenly split) ---
 	cid5 = c.create_claim("ETH/USD", "2500.0", "above", FUTURE_DEADLINE)
@@ -738,6 +812,7 @@ def test_all_terminal_payout_branches_account_for_all_deposited_funds(direct_dep
 	# Stakers A and B get 2 GEN stake refund + 0.5 GEN bond share each = 2.5 GEN each (100% of 5 GEN deposited)
 	assert balance_of(direct_vm, STAKER_A) == bal_a_before + int(2.5 * ATTO)
 	assert balance_of(direct_vm, STAKER_B) == bal_b_before + int(2.5 * ATTO)
+	assert balance_of(direct_vm, TEST_TREASURY_BYTES) == 0
 
 	# --- Branch 6: REFUNDED via lock_deadline_evidence deterministic failure ---
 	cid6 = c.create_claim("ETH/USD", "2500.0", "above", FUTURE_DEADLINE)
@@ -758,6 +833,7 @@ def test_all_terminal_payout_branches_account_for_all_deposited_funds(direct_dep
 	assert c.get_claim(cid6)["state"] == "REFUNDED"
 	assert balance_of(direct_vm, STAKER_A) == bal_a_before + 2 * ATTO
 	assert balance_of(direct_vm, STAKER_B) == bal_b_before + 1 * ATTO
+	assert balance_of(direct_vm, TEST_TREASURY_BYTES) == 0
 
 	# --- Branch 7: REFUNDED via expire_unsettled (24h grace elapsed) ---
 	cid7 = c.create_claim("ETH/USD", "2500.0", "above", FUTURE_DEADLINE)
@@ -772,6 +848,7 @@ def test_all_terminal_payout_branches_account_for_all_deposited_funds(direct_dep
 	assert c.get_claim(cid7)["state"] == "REFUNDED"
 	assert balance_of(direct_vm, STAKER_A) == bal_a_before + 3 * ATTO
 	assert balance_of(direct_vm, STAKER_B) == bal_b_before + 1 * ATTO
+	assert balance_of(direct_vm, TEST_TREASURY_BYTES) == 0
 
 	# --- Branch 8: REFUNDED via expire_unresolved_appeal (48h window elapsed) ---
 	cid8 = c.create_claim("ETH/USD", "2500.0", "above", FUTURE_DEADLINE)
@@ -798,6 +875,66 @@ def test_all_terminal_payout_branches_account_for_all_deposited_funds(direct_dep
 	assert c.get_claim(cid8)["state"] == "REFUNDED"
 	assert balance_of(direct_vm, STAKER_A) == bal_a_before + int(2.5 * ATTO)
 	assert balance_of(direct_vm, STAKER_B) == bal_b_before + int(2.5 * ATTO)
+	assert balance_of(direct_vm, TEST_TREASURY_BYTES) == 0
+
+	# --- Branch 9: Ugly 3-way split with indivisible losing pool remainder ---
+	# FOR winners: A (1 GEN), B (1 GEN), C (1 GEN) -> 3 GEN winning pool
+	# AGAINST losers: D (10 GEN) -> 10 GEN losing pool
+	# Total deposited: 13 GEN. Naive share = 1 + (1*10)//3 = 4.333333333333333333 GEN
+	# Remainder = 1 atto. Allocated to highest hex address winner (STAKER_C = 0xdd... > 0xbb... > 0xaa...).
+	cid9 = c.create_claim("ETH/USD", "2500.0", "above", FUTURE_DEADLINE)
+	register_stake(c, direct_vm, cid9, "for", 1 * ATTO, STAKER_A)
+	register_stake(c, direct_vm, cid9, "for", 1 * ATTO, STAKER_B)
+	register_stake(c, direct_vm, cid9, "for", 1 * ATTO, STAKER_C)
+	register_stake(c, direct_vm, cid9, "against", 10 * ATTO, STAKER_D)
+
+	claim9 = c.claims[cid9]
+	claim9.state = "EVIDENCE_LOCKED"
+	claim9.deadline_price_atto = 3000 * ATTO
+	claim9.deadline_fetched_at = DECLARED_DEADLINE
+	c.claims[cid9] = claim9
+
+	bal_a_before = balance_of(direct_vm, STAKER_A)
+	bal_b_before = balance_of(direct_vm, STAKER_B)
+	bal_c_before = balance_of(direct_vm, STAKER_C)
+	bal_d_before = balance_of(direct_vm, STAKER_D)
+
+	install_payout_and_verdict_hook(direct_vm, "HELD. Price 3000 exceeds 2500.")
+	c.resolve_verdict(cid9)
+
+	delta_a = balance_of(direct_vm, STAKER_A) - bal_a_before
+	delta_b = balance_of(direct_vm, STAKER_B) - bal_b_before
+	delta_c = balance_of(direct_vm, STAKER_C) - bal_c_before
+	delta_d = balance_of(direct_vm, STAKER_D) - bal_d_before
+
+	assert delta_a == 4333333333333333333
+	assert delta_b == 4333333333333333333
+	assert delta_c == 4333333333333333334  # Remainder 1 atto lands on highest address
+	assert delta_d == 0
+	assert delta_a + delta_b + delta_c + delta_d == 13 * ATTO  # Exactly 100% of 13 GEN disbursed
+	assert balance_of(direct_vm, TEST_TREASURY_BYTES) == 0  # Court extra is 0
+
+	# --- Branch 10: REFUNDED via expire_unresolved_lock (24h lock grace elapsed) ---
+	cid10 = c.create_claim("ETH/USD", "2500.0", "above", FUTURE_DEADLINE)
+	register_stake(c, direct_vm, cid10, "for", 2 * ATTO, STAKER_A)
+	register_stake(c, direct_vm, cid10, "against", 3 * ATTO, STAKER_B)
+
+	claim10 = c.claims[cid10]
+	claim10.state = "EVIDENCE_LOCKED"
+	claim10.evidence_locked_at = "2000-01-01T00:00:00.000Z"
+	claim10.deadline_price_atto = 3000 * ATTO
+	claim10.deadline_fetched_at = DECLARED_DEADLINE
+	c.claims[cid10] = claim10
+
+	bal_a_before = balance_of(direct_vm, STAKER_A)
+	bal_b_before = balance_of(direct_vm, STAKER_B)
+
+	c.expire_unresolved_lock(cid10)
+	assert c.get_claim(cid10)["state"] == "REFUNDED"
+	assert c.get_claim(cid10)["paid"] is True
+	assert balance_of(direct_vm, STAKER_A) == bal_a_before + 2 * ATTO
+	assert balance_of(direct_vm, STAKER_B) == bal_b_before + 3 * ATTO
+	assert balance_of(direct_vm, TEST_TREASURY_BYTES) == 0
 
 
 def test_settled_zero_winner_refunds_against_stakes_and_returns_bond(

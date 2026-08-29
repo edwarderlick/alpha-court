@@ -163,9 +163,12 @@ def test_create_claim_enforces_canonical_deadline(direct_deploy, direct_vm):
 		lambda dl: c.create_claim("ETH/USD", "3000.0", "above", dl)
 	)
 
-	# Accepts valid canonical format with Z
+	# Accepts valid canonical format with millis or lowercase z, normalizes to canonical YYYY-MM-DDTHH:MM:SSZ
 	cid = c.create_claim("ETH/USD", "3000.0", "above", "2026-10-01T12:00:00.000Z")
-	assert c.get_claim(cid)["deadline"] == "2026-10-01T12:00:00.000Z"
+	assert c.get_claim(cid)["deadline"] == "2026-10-01T12:00:00Z"
+
+	cid2 = c.create_claim("ETH/USD", "3000.0", "above", "2026-10-01T12:00:00z")
+	assert c.get_claim(cid2)["deadline"] == "2026-10-01T12:00:00Z"
 
 
 def test_relative_claim_enforces_canonical_deadline(direct_deploy, direct_vm):
@@ -290,6 +293,66 @@ def test_delayed_locking_fundamentals_selects_point_at_or_before_deadline(
 	assert locked1["deadline_snapshot_at"] == CORRECT_SNAPSHOT
 	assert locked2["deadline_price"] == locked1["deadline_price"]
 	assert locked2["deadline_snapshot_at"] == locked1["deadline_snapshot_at"]
+
+
+def test_lock_rejects_single_dict_payload_after_deadline(direct_deploy, direct_vm):
+	"""A single dict payload (non-list) after the deadline must be rejected with [EXTERNAL]
+	and must not freeze post-deadline price 9999."""
+	mock_live_trap(direct_vm, "ETH/USD", 9999.0)
+	c = deploy(direct_deploy)
+	cid = c.create_claim("ETH/USD", "2500.0", "above", FUTURE_DEADLINE)
+	force_stored_deadline(c, cid)
+	mock_lock_series(
+		direct_vm,
+		"ETH/USD",
+		{"data": {"timestamp": TRAP_POST_DEADLINE, "price": 9999.0}},
+	)
+	set_vm_time(direct_vm, "2026-08-02T00:00:00Z")
+	with pytest.raises(Exception, match=r"\[EXTERNAL\]"):
+		c.lock_deadline_evidence(cid)
+	unlocked = c.get_claim(cid)
+	assert unlocked["state"] == "OPEN"
+	assert unlocked["deadline_snapshot_at"] == ""
+
+
+def test_lock_accepts_single_dict_payload_at_or_before_deadline(direct_deploy, direct_vm):
+	"""A single dict payload (non-list) with timestamp <= deadline is accepted,
+	storing the point's timestamp (not request deadline)."""
+	mock_live_trap(direct_vm, "ETH/USD", 9999.0)
+	c = deploy(direct_deploy)
+	cid = c.create_claim("ETH/USD", "2500.0", "above", FUTURE_DEADLINE)
+	force_stored_deadline(c, cid)
+	mock_lock_series(
+		direct_vm,
+		"ETH/USD",
+		{"data": {"timestamp": CORRECT_SNAPSHOT, "price": 2800.0}},
+	)
+	set_vm_time(direct_vm, "2026-08-02T00:00:00Z")
+	c.lock_deadline_evidence(cid)
+	locked = c.get_claim(cid)
+	assert locked["state"] == "EVIDENCE_LOCKED"
+	assert locked["deadline_price"] == "2800.0"
+	assert locked["deadline_snapshot_at"] == CORRECT_SNAPSHOT
+
+
+def test_lock_fetched_at_never_falls_back_to_request_deadline(direct_deploy, direct_vm):
+	"""If point timestamp is missing or unparseable, lock must raise [EXTERNAL]
+	and never fall back to request deadline."""
+	mock_live_trap(direct_vm, "ETH/USD", 9999.0)
+	c = deploy(direct_deploy)
+	cid = c.create_claim("ETH/USD", "2500.0", "above", FUTURE_DEADLINE)
+	force_stored_deadline(c, cid)
+	mock_lock_series(
+		direct_vm,
+		"ETH/USD",
+		{"data": [{"price": 2800.0}]},
+	)
+	set_vm_time(direct_vm, "2026-08-02T00:00:00Z")
+	with pytest.raises(Exception, match=r"\[EXTERNAL\]"):
+		c.lock_deadline_evidence(cid)
+	unlocked = c.get_claim(cid)
+	assert unlocked["state"] == "OPEN"
+	assert unlocked["deadline_snapshot_at"] == ""
 
 
 # ============================================================================

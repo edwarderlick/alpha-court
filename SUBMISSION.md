@@ -239,18 +239,18 @@ Every point is addressed in contract logic. Direct-mode coverage is in `contract
 
 Surf's documented `GET /gateway/v1/market/price` accepts `symbol`, `time_range`, `from`, `to`, `currency`. It does **not** document `timestamp=`. `from`/`to` are Unix seconds or `YYYY-MM-DD` and must be used together. A 1-day window returns 5-minute points.
 
-- **Lock path** (`target_time` = `claim.deadline`): URL is `{base}/market/price?symbol={asset}&from={unix_from}&to={unix_to}` where `unix_to = unix(claim.deadline)` and `unix_from = unix_to - 86400`. The series is parsed; the selected point is the latest whose timestamp is **≤ deadline**. Never `data[0]`. Never a point after the deadline. If none qualify, the contract raises `gl.vm.UserError` with `[EXTERNAL]` (deterministic). `deadline_fetched_at` is that payload point's timestamp, normalized to `YYYY-MM-DDTHH:MM:SSZ` — not `claim.deadline` assigned blindly. Point timestamps may be unix int/float or ISO strings.
-- **Relative performance:** both assets are queried with the same `from`/`to`; each selects ≤ deadline; shared `fetched_at` is the later of the two selected point times (still ≤ deadline).
-- **Fundamentals:** lock no longer appends `timestamp=`. Selection is the latest series point ≤ deadline. The previous fallback that picked the earliest point when none qualified is deleted (that could sample post-deadline). Same `[EXTERNAL]` if none ≤ deadline. The selected point's timestamp is persisted as `fetched_at`.
+- **Lock path** (`target_time` = `claim.deadline`): URL is `{base}/market/price?symbol={asset}&from={unix_from}&to={unix_to}` where `unix_to = unix(claim.deadline)` and `unix_from = unix_to - 86400`. Selection applies to both a series array AND a single-object envelope: the selected point must be the latest whose timestamp is **≤ deadline**. If a single object or series has no parseable timestamp or has a timestamp after the deadline, the contract raises `gl.vm.UserError` with `[EXTERNAL]` (deterministic, never falls back to post-deadline points or earliest points). `deadline_fetched_at` is always that selected payload point's canonical ISO timestamp (`YYYY-MM-DDTHH:MM:SSZ`), never the request deadline string blindly assigned. Point timestamps may be unix int/float or ISO strings.
+- **Relative performance:** both assets are queried with the same `from`/`to`; each selects ≤ deadline; shared `fetched_at` is the later of the two selected point ISOs (still strictly ≤ deadline).
+- **Fundamentals:** lock no longer appends `timestamp=`. Selection is the latest series/object point ≤ deadline. The previous fallback that picked the earliest point when none qualified is deleted. Same `[EXTERNAL]` if none ≤ deadline. The selected point's canonical ISO timestamp is persisted as `fetched_at`.
 - **Posting path** (no `target_time`): live `?symbol=` (and current fundamentals URLs without `from`/`to`). `fetched_at` stays `gl.message_raw["datetime"]`. If live `/market/price` returns a list, the MAX-timestamp point is used, not `data[0]`.
 
-Delayed locking cannot change the sampled settlement time or price: a later lock still uses the same `from`/`to` window and still picks the last point ≤ the declared deadline. Tests feed a series whose first element is a post-deadline trap (9999) and require the lock URL to contain `from=` and `to=`; a live-only or `timestamp=` implementation cannot match that mock and cannot store 2800.0 at `2026-08-01T11:00:00Z`.
+Delayed locking cannot change the sampled settlement time or price: a later lock still uses the same `from`/`to` window and still picks the last point ≤ the declared deadline. Tests feed a series whose first element is a post-deadline trap (9999), single-object post-deadline traps, and require the lock URL to contain `from=` and `to=`; a live-only or `timestamp=` implementation cannot match that mock and cannot store 2800.0 at `2026-08-01T11:00:00Z`.
 
 This does **not** claim Surf honors `timestamp=`. It does not.
 
 ### 6b. Canonical Deadline Parsing & Validation
 
-Implemented `_parse_and_validate_canonical_deadline(deadline_raw, current_time_str)` across all three claim creation methods (`create_claim`, `create_relative_performance_claim`, `create_fundamentals_claim`). Enforces strict ISO-8601 UTC (`YYYY-MM-DDTHH:MM:SSZ` or with fractional seconds), rejects space delimiters, missing `Z`, non-UTC offsets (e.g. `+02:00`), unpadded dates, empty strings, and past deadlines.
+Implemented `_parse_and_validate_canonical_deadline(deadline_raw, current_time_str)` across all three claim creation methods (`create_claim`, `create_relative_performance_claim`, `create_fundamentals_claim`). Enforces strict ISO-8601 UTC, normalizes all valid formats (including fractional seconds and lowercase `z`) to canonical `YYYY-MM-DDTHH:MM:SSZ`, and rejects space delimiters, missing `Z`, non-UTC offsets (e.g. `+02:00`), unpadded dates, empty strings, and past deadlines.
 
 ### 6c. Defined Refund Path When Winning Side Has No Stakers
 
@@ -265,6 +265,7 @@ In `_payout_for_claim`, when `winning_pool == 0`, the contract calls `_refund_al
 `contract/test/direct/test_steward_resubmission_fixes.py` covers:
 
 1. Delayed lock on all three claim types, with a post-deadline `data[0]` trap and `from`/`to` URL requirement; two post-deadline lock times store the same snapshot time and deadline-or-before price.
-2. Canonical parsing matrix (space, missing Z, `+02:00`, unpadded date, empty, past) on create_claim, relative, and fundamentals.
-3. Zero-winner RESOLVED refund.
-4. All 5 original terminal branches, plus SETTLED + winning_pool==0 (stakes refunded + bond to filer) and NO_AGREEMENT + zero original stakers (filer balance += 1 GEN; bond does not remain in the contract).
+2. Single-dict lock payloads: post-deadline single object raises `[EXTERNAL]`; ≤-deadline single object stores the payload point's snapshot time; missing/unparseable timestamp raises `[EXTERNAL]` and never falls back to request deadline.
+3. Canonical parsing matrix (space, missing Z, `+02:00`, unpadded date, empty, past, lowercase z, millis) on create_claim, relative, and fundamentals.
+4. Zero-winner RESOLVED refund.
+5. All 5 original terminal branches, plus SETTLED + winning_pool==0 (stakes refunded + bond to filer) and NO_AGREEMENT + zero original stakers (filer balance += 1 GEN; bond does not remain in the contract).

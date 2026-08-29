@@ -1008,10 +1008,7 @@ def _parse_and_validate_canonical_deadline(deadline_raw: str, current_time_str: 
 	except Exception:
 		pass
 
-	if has_utc_offset:
-		canonical_iso = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-	else:
-		canonical_iso = text
+	canonical_iso = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 	if cur_dt is not None:
 		if dt <= cur_dt:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} deadline must be in the future")
@@ -1054,46 +1051,52 @@ def _unix_to_canonical_iso(unix_ts: int | float) -> str:
 
 
 def _parse_point_timestamp(raw_ts) -> tuple[int, str]:
-	"""Parses a point timestamp from integer/float unix seconds or ISO string."""
+	"""Parses a point timestamp from integer/float unix seconds or ISO string,
+	normalizing to integer unix seconds and canonical UTC ISO8601 YYYY-MM-DDTHH:MM:SSZ."""
 	if isinstance(raw_ts, (int, float)):
 		u_sec = int(raw_ts)
 		return u_sec, _unix_to_canonical_iso(u_sec)
 	text = str(raw_ts).strip()
+	if not text:
+		raise gl.vm.UserError(f"{ERROR_EXTERNAL} empty point timestamp")
 	if text.isdigit() or (text.replace(".", "", 1).isdigit() and "." in text):
 		u_sec = int(float(text))
 		return u_sec, _unix_to_canonical_iso(u_sec)
 	u_sec = _iso_to_unix(text)
-	clean = text.rstrip("Z").rstrip("z")
-	if "+" in clean:
-		clean = clean.split("+", 1)[0]
-	if "." in clean:
-		clean = clean.split(".", 1)[0]
-	return u_sec, f"{clean[:19]}Z"
+	return u_sec, _unix_to_canonical_iso(u_sec)
 
 
 def _select_series_point(points: list[dict], target_unix: int | None) -> tuple[dict, str]:
 	"""Selects the latest series point at or before target_unix.
 	
-	If target_unix is None (posting time), selects the latest available point.
+	If target_unix is None (posting time), selects the latest available point
+	(or the point itself if no timestamps are present).
 	If target_unix is provided (deadline lock), selects the point with the maximum
-	timestamp that satisfies point_unix <= target_unix.
+	timestamp that satisfies point_unix <= target_unix. Point MUST have a valid timestamp <= target_unix.
 	Raises ERROR_EXTERNAL if no points qualify (never falls back to post-deadline points).
 	"""
 	if not points:
 		raise gl.vm.UserError(f"{ERROR_EXTERNAL} empty series points list")
 	valid_points: list[tuple[int, str, dict]] = []
 	for pt in points:
-		if not isinstance(pt, dict) or "timestamp" not in pt:
+		if not isinstance(pt, dict):
 			continue
-		try:
-			u_sec, iso = _parse_point_timestamp(pt["timestamp"])
-		except Exception:
-			continue
-		if target_unix is not None:
-			if u_sec <= target_unix:
-				valid_points.append((u_sec, iso, pt))
+		if "timestamp" in pt and pt["timestamp"] not in (None, ""):
+			try:
+				u_sec, iso = _parse_point_timestamp(pt["timestamp"])
+				if target_unix is not None:
+					if u_sec <= target_unix:
+						valid_points.append((u_sec, iso, pt))
+				else:
+					valid_points.append((u_sec, iso, pt))
+			except Exception:
+				continue
 		else:
-			valid_points.append((u_sec, iso, pt))
+			# If no timestamp field:
+			# At lock time (target_unix is not None), this cannot be verified as <= deadline -> invalid.
+			# At posting time (target_unix is None), accept as snapshot point without timestamp.
+			if target_unix is None:
+				valid_points.append((0, "", pt))
 
 	if not valid_points:
 		if target_unix is not None:
@@ -1183,6 +1186,7 @@ def _fmt_num(value: float | None) -> str | None:
 def _parse_surf_price(payload: dict | list, target_time: str = "") -> tuple[float, str]:
 	"""
 	Defensive extraction of the spot price and timestamp from Surf's response envelope.
+	Normalizes payload into a list of point dicts and selects the point via _select_series_point.
 	When target_time is given (lock), selects the latest point <= target_time from
 	the returned series and extracts its timestamp normalized to canonical ISO8601.
 	When target_time is empty (posting), selects the latest point.
@@ -1190,20 +1194,14 @@ def _parse_surf_price(payload: dict | list, target_time: str = "") -> tuple[floa
 	data = payload.get("data", payload) if isinstance(payload, dict) else payload
 	target_unix = _iso_to_unix(target_time) if target_time else None
 
-	selected_point = {}
-	point_iso = ""
-
-	if isinstance(data, list):
-		selected_point, point_iso = _select_series_point(data, target_unix)
-	elif isinstance(data, dict):
-		selected_point = data
-		if "timestamp" in selected_point:
-			try:
-				_, point_iso = _parse_point_timestamp(selected_point["timestamp"])
-			except Exception:
-				point_iso = ""
+	if isinstance(data, dict):
+		points = [data]
+	elif isinstance(data, list):
+		points = data
 	else:
 		raise gl.vm.UserError(f"{ERROR_EXTERNAL} unexpected Surf response shape: {type(data)}")
+
+	selected_point, point_iso = _select_series_point(points, target_unix)
 
 	for key in ("price", "value", "last", "spot_price", "close"):
 		if key in selected_point:
@@ -1258,11 +1256,12 @@ def _fetch_prices_with_consensus(
 		prices = [r[0] for r in results]
 		point_isos = [r[1] for r in results if r[1]]
 		if target_time:
-			if point_isos:
-				point_isos.sort()
-				fetched_at = point_isos[-1]
-			else:
-				fetched_at = target_time
+			if not point_isos or len(point_isos) != len(assets):
+				raise gl.vm.UserError(
+					f"{ERROR_EXTERNAL} missing or invalid payload point timestamp at deadline"
+				)
+			point_isos.sort()
+			fetched_at = point_isos[-1]
 		else:
 			fetched_at = gl.message_raw["datetime"]
 		return {
@@ -1309,12 +1308,20 @@ def _parse_fundamentals_value(payload: dict | list, target_time: str = "") -> tu
 	ERROR_EXTERNAL.
 	"""
 	data = payload.get("data", payload) if isinstance(payload, dict) else payload
-	if not isinstance(data, list) or not data:
+	if isinstance(data, dict):
+		points = [data]
+	elif isinstance(data, list):
+		points = data
+	else:
+		raise gl.vm.UserError(
+			f"{ERROR_EXTERNAL} unrecognized fundamentals response shape: {type(data)}"
+		)
+	if not points:
 		raise gl.vm.UserError(
 			f"{ERROR_EXTERNAL} unrecognized fundamentals response shape: no data points"
 		)
 	target_unix = _iso_to_unix(target_time) if target_time else None
-	selected_pt, point_iso = _select_series_point(data, target_unix)
+	selected_pt, point_iso = _select_series_point(points, target_unix)
 	for key in ("value", "price", "metric_value"):
 		if key in selected_pt:
 			return float(selected_pt[key]), point_iso
@@ -1357,7 +1364,11 @@ def _fetch_fundamentals_with_consensus(
 	def leader_fn() -> dict:
 		value, point_iso = _fetch_fundamentals_value(asset, metric, api_key, base_url, target_time)
 		if target_time:
-			fetched_at = point_iso if point_iso else target_time
+			if not point_iso:
+				raise gl.vm.UserError(
+					f"{ERROR_EXTERNAL} missing or invalid payload point timestamp at deadline"
+				)
+			fetched_at = point_iso
 		else:
 			fetched_at = gl.message_raw["datetime"]
 		return {
